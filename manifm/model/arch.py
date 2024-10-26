@@ -106,6 +106,60 @@ class ProjectToTangent(nn.Module):
         return v
 
 
+class LatentRectifiedFlow(nn.Module):
+    def __init__(self, manifold):
+        super().__init__()
+        self.encoder = None
+        self.decoder = None
+        self.latent_vecfield = None
+        self.manifold = manifold
+
+    def forward(self, t, x):
+        l = self.encode(t, x)
+        x_hat = self.decode(t, l)
+        v = self.compute_latent_vecfield(t, l.detach())
+        return x_hat, v
+
+    def encode(self, t, x):
+        x = self._apply_manifold_constraint(x)
+        return self.encoder(t, x)
+
+    def decode(self, t, l):
+        return self.decoder(t, l)
+
+    def compute_latent_vecfield(self, t, l):
+        return self.latent_vecfield(t, l)
+
+    @torch.no_grad()
+    def latent_odeint(self, x, t):
+        num_steps = len(t)-1
+        for i in range(num_steps):
+            ti, dt = t[i], t[i+1] - t[i]
+            l = self.encode(ti, x)
+            v = self.compute_latent_vecfield(ti, l)
+
+            # Extrapolate latent.
+            l = l + v * dt
+            x = self.decode(ti, l)
+
+        return x
+
+    def _apply_manifold_constraint(self, x):
+        if isinstance(self.manifold, Mesh):
+            # Memory-efficient implementation for meshes.
+            with torch.no_grad():
+                _, f_idx = closest_point(x, self.manifold.v, self.manifold.f)
+                vs = self.manifold.v[self.manifold.f[f_idx]]
+                n = face_normal(a=vs[:, 0], b=vs[:, 1], c=vs[:, 2])
+            x = x + (n * (vs[:, 0] - x)).sum(-1, keepdim=True) * n
+        if isinstance(self.manifold, SPD):
+            # projx is expensive and we can just skip it since it doesn't affect divergence.
+            pass
+        else:
+            x = self.manifold.projx(x)
+        return x
+
+
 if __name__ == "__main__":
     print(diffeq_layers.ConcatLinear_v2(3, 64))
 

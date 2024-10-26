@@ -385,65 +385,75 @@ class ManifoldFMLitModule(pl.LightningModule):
         return self.manifold.dist(x0, x1)
 
     @torch.no_grad()
-    def sample(self, n_samples, device, x0=None):
-        if x0 is None:
-            # Sample from base distribution.
-            x0 = (
-                self.manifold.random_base(n_samples, self.dim)
-                .reshape(n_samples, self.dim)
-                .to(device)
-            )
+    def sample(self, n_samples, device, x0=None, num_steps=1000):
+        # TODO: Implement this.
+        pass
 
-        local_coords = self.cfg.get("local_coords", False)
-        eval_projx = self.cfg.get("eval_projx", False)
+    # @torch.no_grad()
+    # def sample(self, n_samples, device, x0=None):
+    #     if x0 is None:
+    #         # Sample from base distribution.
+    #         x0 = (
+    #             self.manifold.random_base(n_samples, self.dim)
+    #             .reshape(n_samples, self.dim)
+    #             .to(device)
+    #         )
 
-        # Solve ODE.
-        if not eval_projx and not local_coords:
-            # If no projection, use adaptive step solver.
-            x1 = odeint(
-                self.vecfield,
-                x0,
-                t=torch.linspace(0, 1, 2).to(device),
-                atol=self.cfg.model.atol,
-                rtol=self.cfg.model.rtol,
-                options={"min_step": 1e-5}
-            )[-1]
-        else:
-            # If projection, use 1000 steps.
-            x1 = projx_integrator_return_last(
-                self.manifold,
-                self.vecfield,
-                x0,
-                t=torch.linspace(0, 1, 1001).to(device),
-                method="euler",
-                projx=eval_projx,
-                local_coords=local_coords,
-                pbar=True,
-            )
-        # x1 = self.manifold.projx(x1)
-        return x1
+    #     local_coords = self.cfg.get("local_coords", False)
+    #     eval_projx = self.cfg.get("eval_projx", False)
+
+    #     # Solve ODE.
+    #     if not eval_projx and not local_coords:
+    #         # If no projection, use adaptive step solver.
+    #         x1 = odeint(
+    #             self.vecfield,
+    #             x0,
+    #             t=torch.linspace(0, 1, 2).to(device),
+    #             atol=self.cfg.model.atol,
+    #             rtol=self.cfg.model.rtol,
+    #             options={"min_step": 1e-5}
+    #         )[-1]
+    #     else:
+    #         # If projection, use 1000 steps.
+    #         x1 = projx_integrator_return_last(
+    #             self.manifold,
+    #             self.vecfield,
+    #             x0,
+    #             t=torch.linspace(0, 1, 1001).to(device),
+    #             method="euler",
+    #             projx=eval_projx,
+    #             local_coords=local_coords,
+    #             pbar=True,
+    #         )
+    #     # x1 = self.manifold.projx(x1)
+    #     return x1
 
     @torch.no_grad()
-    def sample_all(self, n_samples, device, x0=None):
-        if x0 is None:
-            # Sample from base distribution.
-            x0 = (
-                self.manifold.random_base(n_samples, self.dim)
-                .reshape(n_samples, self.dim)
-                .to(device)
-            )
+    def sample_all(self, n_samples, device, x0=None, num_steps=1000):
+        # TODO: Implement this.
+        pass
 
-        # Solve ODE.
-        xs, _ = projx_integrator(
-            self.manifold,
-            self.vecfield,
-            x0,
-            t=torch.linspace(0, 1, 1001).to(device),
-            method="euler",
-            projx=True,
-            pbar=True,
-        )
-        return xs
+    # @torch.no_grad()
+    # def sample_all(self, n_samples, device, x0=None):
+    #     if x0 is None:
+    #         # Sample from base distribution.
+    #         x0 = (
+    #             self.manifold.random_base(n_samples, self.dim)
+    #             .reshape(n_samples, self.dim)
+    #             .to(device)
+    #         )
+
+    #     # Solve ODE.
+    #     xs, _ = projx_integrator(
+    #         self.manifold,
+    #         self.vecfield,
+    #         x0,
+    #         t=torch.linspace(0, 1, 1001).to(device),
+    #         method="euler",
+    #         projx=True,
+    #         pbar=True,
+    #     )
+    #     return xs
 
     @torch.no_grad()
     def compute_exact_loglikelihood(
@@ -552,6 +562,32 @@ class ManifoldFMLitModule(pl.LightningModule):
 
     def loss_fn(self, batch: torch.Tensor):
         return self.rfm_loss_fn(batch)
+
+    def lrf_loss_fn(self, batch: torch.Tensor):
+        if isinstance(batch, dict):
+            x0 = batch["x0"]
+            x1 = batch["x1"]
+        else:
+            x1 = batch
+            x0 = self.manifold.random_base(x1.shape[0], self.dim).to(x1)
+
+        N = x1.shape[0]
+
+        # If is instance of simple geometry.
+        t = torch.rand(N).reshape(-1, 1).to(x1)
+
+        def cond_u(x0, x1, t):
+            path = geodesic(self.manifold, x0, x1)
+            x_t, u_t = jvp(path, (t,), (torch.ones_like(t).to(t),))
+            return x_t, u_t
+
+        x_t, u_t = vmap(cond_u)(x0, x1, t)
+        x_t = x_t.reshape(N, self.dim)
+        u_t = u_t.reshape(N, self.dim)
+
+        # TODO: Modify the loss in the format of fm_loss + beta*rec_loss.
+        diff = self.vecfield(t, x_t) - u_t
+        return self.manifold.inner(x_t, diff, diff).mean() / self.dim
 
     def rfm_loss_fn(self, batch: torch.Tensor):
         if isinstance(batch, dict):

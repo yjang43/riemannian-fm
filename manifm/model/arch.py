@@ -56,93 +56,104 @@ class PositionalEncoding(nn.Module):
         return torch.cat(feature_vector, dim=-1)
 
 
-class Unbatch(nn.Module):
-    def __init__(self, vecfield):
-        super().__init__()
-        self.vecfield = vecfield
+# class Unbatch(nn.Module):
+#     def __init__(self, vecfield):
+#         super().__init__()
+#         self.vecfield = vecfield
 
-    def forward(self, t, x):
+#     def forward(self, t, x):
+#         has_batch = x.ndim > 1
+#         if not has_batch:
+#             x = x.reshape(1, -1)
+#             t = t.reshape(-1)
+#         v = self.vecfield(t, x)
+#         if not has_batch:
+#             v = v[0]
+#         return v
+
+
+# class ProjectToTangent(nn.Module):
+#     """Projects a vector field onto the tangent plane at the input."""
+
+#     def __init__(self, vecfield, manifold, metric_normalize):
+#         super().__init__()
+#         self.vecfield = vecfield
+#         self.manifold = manifold
+#         self.metric_normalize = metric_normalize
+
+#     def forward(self, t, x):
+#         if isinstance(self.manifold, Mesh):
+#             # Memory-efficient implementation for meshes.
+#             with torch.no_grad():
+#                 _, f_idx = closest_point(x, self.manifold.v, self.manifold.f)
+#                 vs = self.manifold.v[self.manifold.f[f_idx]]
+#                 n = face_normal(a=vs[:, 0], b=vs[:, 1], c=vs[:, 2])
+#             x = x + (n * (vs[:, 0] - x)).sum(-1, keepdim=True) * n
+#             v = self.vecfield(t, x)
+#             v = v - (n * v).sum(-1, keepdim=True) * n
+#         if isinstance(self.manifold, SPD):
+#             # projx is expensive and we can just skip it since it doesn't affect divergence.
+#             v = self.vecfield(t, x)
+#             v = self.manifold.proju(x, v)
+#         else:
+#             x = self.manifold.projx(x)
+#             v = self.vecfield(t, x)
+#             v = self.manifold.proju(x, v)
+
+#         if self.metric_normalize and hasattr(self.manifold, "metric_normalized"):
+#             v = self.manifold.metric_normalized(x, v)
+
+#         return v
+
+class LatentRectifiedFlow(nn.Module):
+    def __init__(
+        self,
+        d_in,
+        d_model,
+        num_layers,
+        actfn,
+        fourier,
+        manifold
+    ):
+        super().__init__()
+        self.encoder = tMLP(
+            d_in, d_model, d_model,
+            num_layers, actfn, fourier)
+        self.decoder = tMLP(
+            d_model, d_in, d_model,
+            num_layers, actfn, fourier)
+        self.latent_vecfield = tMLP(
+            d_model, d_in, d_model,
+            num_layers, actfn, fourier)
+        self.manifold = manifold
+
+    def forward(self, t, x, recon=True, vecfield=True):
         has_batch = x.ndim > 1
         if not has_batch:
             x = x.reshape(1, -1)
             t = t.reshape(-1)
-        v = self.vecfield(t, x)
-        if not has_batch:
-            v = v[0]
-        return v
 
-
-class ProjectToTangent(nn.Module):
-    """Projects a vector field onto the tangent plane at the input."""
-
-    def __init__(self, vecfield, manifold, metric_normalize):
-        super().__init__()
-        self.vecfield = vecfield
-        self.manifold = manifold
-        self.metric_normalize = metric_normalize
-
-    def forward(self, t, x):
-        if isinstance(self.manifold, Mesh):
-            # Memory-efficient implementation for meshes.
-            with torch.no_grad():
-                _, f_idx = closest_point(x, self.manifold.v, self.manifold.f)
-                vs = self.manifold.v[self.manifold.f[f_idx]]
-                n = face_normal(a=vs[:, 0], b=vs[:, 1], c=vs[:, 2])
-            x = x + (n * (vs[:, 0] - x)).sum(-1, keepdim=True) * n
-            v = self.vecfield(t, x)
-            v = v - (n * v).sum(-1, keepdim=True) * n
-        if isinstance(self.manifold, SPD):
-            # projx is expensive and we can just skip it since it doesn't affect divergence.
-            v = self.vecfield(t, x)
-            v = self.manifold.proju(x, v)
-        else:
-            x = self.manifold.projx(x)
-            v = self.vecfield(t, x)
-            v = self.manifold.proju(x, v)
-
-        if self.metric_normalize and hasattr(self.manifold, "metric_normalized"):
-            v = self.manifold.metric_normalized(x, v)
-
-        return v
-
-
-class LatentRectifiedFlow(nn.Module):
-    def __init__(self, manifold):
-        super().__init__()
-        self.encoder = None
-        self.decoder = None
-        self.latent_vecfield = None
-        self.manifold = manifold
-
-    def forward(self, t, x):
-        l = self.encode(t, x)
-        x_hat = self.decode(t, l)
-        v = self.compute_latent_vecfield(t, l.detach())
-        return x_hat, v
-
-    def encode(self, t, x):
         x = self._apply_manifold_constraint(x)
-        return self.encoder(t, x)
+        l = self.encoder(t, x)
 
-    def decode(self, t, l):
-        return self.decoder(t, l)
+        x_hat = self.decoder(t, l) if recon else None
+        v = self.latent_vecfield(t, l.detach()) if vecfield else None
 
-    def compute_latent_vecfield(self, t, l):
-        return self.latent_vecfield(t, l)
+        if not has_batch:
+            x_hat = x_hat[0] if recon else None
+            v = v[0] if vecfield else None
 
-    @torch.no_grad()
-    def latent_odeint(self, x, t):
-        num_steps = len(t)-1
-        for i in range(num_steps):
-            ti, dt = t[i], t[i+1] - t[i]
-            l = self.encode(ti, x)
-            v = self.compute_latent_vecfield(ti, l)
+        return l, v, x_hat
 
-            # Extrapolate latent.
-            l = l + v * dt
-            x = self.decode(ti, l)
+    # def encode(self, t, x):
+    #     x = self._apply_manifold_constraint(x)
+    #     return self.encoder(t, x)
 
-        return x
+    # def decode(self, t, l):
+    #     return self.decoder(t, l)
+
+    # def compute_latent_vecfield(self, t, l):
+    #     return self.latent_vecfield(t, l)
 
     def _apply_manifold_constraint(self, x):
         if isinstance(self.manifold, Mesh):
@@ -158,6 +169,47 @@ class LatentRectifiedFlow(nn.Module):
         else:
             x = self.manifold.projx(x)
         return x
+
+
+@torch.no_grad()
+def latent_odeint(model, x, t):
+    if not isinstance(model, LatentRectifiedFlow):
+        raise ValueError("model must be LatentRectifiedFlow.")
+    num_steps = len(t)-1
+    xs = [x]
+    for i in range(num_steps):
+        ti, dt = t[i], t[i+1] - t[i]
+        l = model.encoder(ti, x)
+        v = model.latent_vecfield(ti, l)
+
+        # Extrapolate latent.
+        l = l + v * dt
+        x = model.decoder(ti, l)
+        xs.append(x)
+
+    xs = torch.stack(xs, dim=0)
+    return xs
+
+@torch.no_grad()
+def projx_latent_odeint(manifold, model, x, t, projx=True, local_coords=False):
+    if not isinstance(model, LatentRectifiedFlow):
+        raise ValueError("model must be LatentRectifiedFlow.")
+    num_steps = len(t)-1
+    xs = [x]
+    for i in range(num_steps):
+        ti, dt = t[i], t[i+1] - t[i]
+        l = model.encoder(ti, x)
+        v = model.latent_vecfield(ti, l)
+
+        # Extrapolate latent.
+        l = l + v * dt
+        x = model.decoder(ti, l)
+        if projx:
+            x = manifold.projx(x)
+        xs.append(x)
+
+    xs = torch.stack(xs, dim=0)
+    return xs
 
 
 if __name__ == "__main__":

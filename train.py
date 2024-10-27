@@ -74,7 +74,8 @@ def main(cfg: DictConfig):
     callbacks = [
         ModelCheckpoint(
             dirpath="checkpoints",
-            monitor="val/loss_best",
+            # monitor="val/loss_best",
+            monitor="val/neg_logprob_best",
             mode="min",
             filename="epoch-{epoch:03d}_step-{global_step}_loss-{val_loss:.4f}",
             auto_insert_metric_name=False,

@@ -34,7 +34,7 @@ from manifm.manifolds import (
 from manifm.manifolds.spd import plot_cone
 from manifm.manifolds import geodesic
 from manifm.mesh_utils import trimesh_to_vtk, points_to_vtk
-# from manifm.solvers import projx_integrator_return_last, projx_integrator
+from manifm.solvers import projx_integrator_return_last, projx_integrator
 
 
 def div_fn(u):
@@ -92,10 +92,11 @@ class ManifoldFMLitModule(pl.LightningModule):
         self.cfg = cfg
 
         self.manifold, self.dim = get_manifold(cfg)
-        self.latent_manifold = Euclidean(1)
+        self.latent_manifold, self.latent_dim = Euclidean(1), cfg.model.d_latent
 
         self.model = LatentRectifiedFlow(
             self.dim,
+            d_latent = cfg.model.d_latent,
             d_model=cfg.model.d_model,
             num_layers=cfg.model.num_layers,
             actfn=cfg.model.actfn,
@@ -115,6 +116,8 @@ class ManifoldFMLitModule(pl.LightningModule):
 
         # for logging best so far validation accuracy
         self.val_metric_best = MinMetric()
+        self.rec_scale = cfg.model.get("rec_scale", 1.0)
+        self.lat_scale = cfg.model.get("lat_scale", 1.0)
 
     # @property
     # def vecfield(self):
@@ -549,11 +552,102 @@ class ManifoldFMLitModule(pl.LightningModule):
         self,
         batch: torch.Tensor,
         t1: float = 1.0,
-        return_projx_error: bool = False,
         num_steps=1000,
     ):
-        # NOTE: Not sure how to implement log likelihood for lrf.
-        pass
+        """Computes the negative log-likelihood of a batch of data."""
+
+        try:
+            nfe = [0]
+
+            div_mode = self.cfg.get("div_mode", "exact")
+
+            with torch.inference_mode(mode=False):
+                v = None
+                if div_mode == "rademacher":
+                    v = torch.randint(low=0, high=2, size=batch.shape).to(batch) * 2 - 1
+
+                l1, _, _ = self.model(
+                    torch.full_like(batch[..., :1], t1), batch,
+                    projl=True, vecfield=False, recon=False
+                )
+
+                @torch.no_grad()
+                def odefunc(t, tensor):
+                    nfe[0] += 1
+                    t = t.to(tensor)
+                    l = tensor[..., :self.latent_dim]
+                    vecfield = lambda l: self.model(
+                        t, l, projl=False, vecfield=True, recon=False
+                    )[1]
+                    dl, div = output_and_div(vecfield, l, v=v, div_mode=div_mode)
+                    div = div.reshape(-1, 1)
+                    del t, l
+                    return torch.cat([dl, div], dim=-1)
+
+                # Solve ODE on the product manifold of data manifold x euclidean.
+                product_man = ProductManifold(
+                    (self.latent_manifold, self.latent_dim), (Euclidean(), 1)
+                )
+                state1 = torch.cat([l1, torch.zeros_like(l1[..., :1])], dim=-1)
+
+                local_coords = self.cfg.get("local_coords", False)
+                eval_projx = self.cfg.get("eval_projx", False)
+
+                with torch.no_grad():
+                    if not eval_projx and not local_coords:
+                        # If no projection, use adaptive step solver.
+                        state0 = odeint(
+                            odefunc,
+                            state1,
+                            t=torch.linspace(t1, 0, 2).to(batch),
+                            atol=self.cfg.model.atol,
+                            rtol=self.cfg.model.rtol,
+                            method="dopri5",
+                            options={"min_step": 1e-5},
+                        )[-1]
+                    else:
+                        # If projection, use 1000 steps.
+                        state0 = projx_integrator_return_last(
+                            product_man,
+                            odefunc,
+                            state1,
+                            t=torch.linspace(t1, 0, num_steps + 1).to(batch),
+                            method="euler",
+                            projx=eval_projx,
+                            local_coords=local_coords,
+                            pbar=True,
+                        )
+
+                # log number of function evaluations
+                self.log("nfe", nfe[0], prog_bar=True, logger=True)
+
+
+                l0, logdetjac = state0[..., : self.dim], state0[..., -1]
+
+                with torch.no_grad():
+                    _, _, x0 = self.model(
+                        torch.zeros_like(l0[..., :1]), l0,
+                        projl=False, vecfield=False, recon=True
+                    )
+                x0_ = x0
+                x0 = self.manifold.projx(x0)
+
+                # log how close the final solution is to the manifold.
+                integ_error = (x0[..., : self.dim] - x0_[..., : self.dim]).abs().max()
+                self.log("integ_error", integ_error)
+
+                # NOTE: Assume the log prob of l0 is the same as log prob of x0.
+                logp0 = self.manifold.base_logprob(x0)
+                # logp0 = torch.zeros_like(logdetjac) # Assume sampling l0 from ndim unit hyper cube.
+                logp1 = logp0 + logdetjac
+
+                if self.cfg.get("normalize_loglik", False):
+                    logp1 = logp1 / self.latent_dim
+
+                return logp1
+        except:
+            traceback.print_exc()
+            return torch.zeros(batch.shape[0]).to(batch)
     # @torch.no_grad()
     # def compute_exact_loglikelihood(
     #     self,
@@ -674,6 +768,7 @@ class ManifoldFMLitModule(pl.LightningModule):
 
         N = x1.shape[0]
 
+        # TODO: Expand the types of manifold and process x_t accordingly.
         # NOTE: Consider simple geometry only for now.
         t = torch.rand(N).reshape(-1, 1).to(x1)
 
@@ -685,20 +780,30 @@ class ManifoldFMLitModule(pl.LightningModule):
         x_t, _ = vmap(cond_u)(x0, x1, t)
         x_t = x_t.reshape(N, self.dim)
 
-        # TODO: Modify the loss in the format of fm_loss + beta*rec_loss.
+        # Get ground truth gradient of latent v_t.
         with torch.no_grad():
-            l0, _, _ = self.model(x0, torch.zeros_like(t), recon=False, vecfield=False)
-            l1, _, _ = self.model(x1, torch.ones_like(t), recon=False, vecfield=False)
-        u_t = l1 - l0
+            l0, _, _ = self.model(torch.zeros_like(t), x0, vecfield=False, recon=False)
+            l1, _, _ = self.model(torch.ones_like(t), x1, vecfield=False, recon=False)
+        v_t = l1 - l0
 
-        h_t, v_t, rec_x_t = self.model(x_t, t)
+        # Get interpolated latent l_t.
+        l_t = t*l1 + (1-t)*l0
+
+        l_t_hat, v_t_hat, x_t_hat = self.model(t, x_t)
         
-        diff = v_t - u_t
-        fm_loss = self.latent_manifold.inner(h_t, diff, diff).mean() / self.dim
-        rec_loss = (rec_x_t - x_t).pow(2).mean()
-        scale = 1.
+        # diff = v_t_hat - v_t
+        # fm_loss = self.latent_manifold.inner(l_t, diff, diff).mean() / self.latent_dim
+        lat_loss = (l_t_hat - l_t).pow(2).mean() / self.latent_dim
+        fm_loss = (v_t_hat - v_t).pow(2).mean() / self.latent_dim
+        rec_loss = (x_t_hat - x_t).pow(2).mean() / self.dim
 
-        return fm_loss + scale * rec_loss
+        # # TODO: Remove the line below
+        # rec_loss = torch.zeros_like(fm_loss)
+
+        return (
+            self.lat_scale*lat_loss + fm_loss + self.rec_scale*rec_loss,
+            lat_loss, fm_loss, rec_loss
+        )
 
     # def rfm_loss_fn(self, batch: torch.Tensor):
     #     if isinstance(batch, dict):
@@ -762,10 +867,13 @@ class ManifoldFMLitModule(pl.LightningModule):
     #     return self.manifold.inner(x_t, diff, diff).mean() / self.dim
 
     def training_step(self, batch: Any, batch_idx: int):
-        loss = self.loss_fn(batch)
+        loss, lat_loss, fm_loss, rec_loss = self.loss_fn(batch)
 
         if torch.isfinite(loss):
             # log train metrics
+            self.log("train/lat_loss", lat_loss, on_step=True)
+            self.log("train/fm_loss", fm_loss, on_step=True)
+            self.log("train/rec_loss", rec_loss, on_step=True)
             self.log("train/loss", loss, on_step=True, on_epoch=True)
             self.train_metric.update(loss)
         else:
@@ -777,39 +885,88 @@ class ManifoldFMLitModule(pl.LightningModule):
         # and then read it in some callback or in `training_epoch_end()` below
         # remember to always return loss from `training_step()` or else backpropagation will fail!
         return {"loss": loss}
+    # def training_step(self, batch: Any, batch_idx: int):
+    #     loss = self.loss_fn(batch)
+
+    #     if torch.isfinite(loss):
+    #         # log train metrics
+    #         self.log("train/loss", loss, on_step=True, on_epoch=True)
+    #         self.train_metric.update(loss)
+    #     else:
+    #         # skip step if loss is NaN.
+    #         print(f"Skipping iteration because loss is {loss.item()}.")
+    #         return None
+
+    #     # we can return here dict with any tensors
+    #     # and then read it in some callback or in `training_epoch_end()` below
+    #     # remember to always return loss from `training_step()` or else backpropagation will fail!
+    #     return {"loss": loss}
 
     def training_epoch_end(self, outputs: List[Any]):
         # `outputs` is a list of dicts returned from `training_step()`
         self.train_metric.reset()
 
     def validation_step(self, batch: Any, batch_idx: int):
+        # Compute losses.
+        loss, lat_loss, fm_loss, rec_loss = self.loss_fn(batch)
+
+        # Compute log probabilty.
         if isinstance(batch, dict):
             x1 = batch["x1"]
         else:
             x1 = batch
-
-        logprob = self.compute_exact_loglikelihood(x1)
-        loss = -logprob.mean()
+        logprob = self.compute_exact_loglikelihood(x1).mean()
+        neg_logprob = -logprob
         batch_size = x1.shape[0]
 
-        self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=batch_size)
-        self.val_metric.update(-logprob)
+        self.log("val/neg_logprob", neg_logprob, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        self.log("val/lat_loss", lat_loss, on_epoch=True, batch_size=batch_size)
+        self.log("val/fm_loss", fm_loss, on_epoch=True, batch_size=batch_size)
+        self.log("val/rec_loss", rec_loss, on_epoch=True, batch_size=batch_size)
+        self.log("val/loss", loss, on_epoch=True, batch_size=batch_size)
+        self.val_metric.update(neg_logprob)
 
         if batch_idx == 0:
             self.visualize(batch)
 
-        return {"loss": loss}
+    # def validation_step(self, batch: Any, batch_idx: int):
+    #     if isinstance(batch, dict):
+    #         x1 = batch["x1"]
+    #     else:
+    #         x1 = batch
+
+    #     logprob = self.compute_exact_loglikelihood(x1)
+    #     loss = -logprob.mean()
+    #     batch_size = x1.shape[0]
+
+    #     self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=batch_size)
+    #     self.val_metric.update(-logprob)
+
+    #     if batch_idx == 0:
+    #         self.visualize(batch)
+
+    #     return {"loss": loss}
 
     def validation_epoch_end(self, outputs: List[Any]):
         val_loss = self.val_metric.compute()  # get val accuracy from current epoch
         self.val_metric_best.update(val_loss)
         self.log(
-            "val/loss_best",
+            "val/neg_logprob_best",
             self.val_metric_best.compute(),
             on_epoch=True,
             prog_bar=True,
         )
         self.val_metric.reset()
+    # def validation_epoch_end(self, outputs: List[Any]):
+    #     val_loss = self.val_metric.compute()  # get val accuracy from current epoch
+    #     self.val_metric_best.update(val_loss)
+    #     self.log(
+    #         "val/loss_best",
+    #         self.val_metric_best.compute(),
+    #         on_epoch=True,
+    #         prog_bar=True,
+    #     )
+    #     self.val_metric.reset()
 
     def test_step(self, batch: Any, batch_idx: int):
         if isinstance(batch, dict):

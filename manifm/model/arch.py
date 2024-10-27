@@ -109,6 +109,7 @@ class LatentRectifiedFlow(nn.Module):
     def __init__(
         self,
         d_in,
+        d_latent,
         d_model,
         num_layers,
         actfn,
@@ -117,28 +118,35 @@ class LatentRectifiedFlow(nn.Module):
     ):
         super().__init__()
         self.encoder = tMLP(
-            d_in, d_model, d_model,
+            d_in, d_latent, d_model,
             num_layers, actfn, fourier)
         self.decoder = tMLP(
-            d_model, d_in, d_model,
+            d_latent, d_in, d_model,
             num_layers, actfn, fourier)
         self.latent_vecfield = tMLP(
-            d_model, d_in, d_model,
+            d_latent, d_latent, d_model,
             num_layers, actfn, fourier)
         self.manifold = manifold
 
-    def forward(self, t, x, recon=True, vecfield=True):
-        has_batch = x.ndim > 1
+    def forward(self, t, x_or_l, projl=True, vecfield=True, recon=True):
+        # Batchify
+        has_batch = x_or_l.ndim > 1
         if not has_batch:
-            x = x.reshape(1, -1)
+            x_or_l = x_or_l.reshape(1, -1)
             t = t.reshape(-1)
 
-        x = self._apply_manifold_constraint(x)
-        l = self.encoder(t, x)
+        if projl:
+            x = x_or_l
+            x = self._apply_manifold_constraint(x)
+            l = self.encoder(t, x)
+        else:
+            l = x_or_l
 
         x_hat = self.decoder(t, l) if recon else None
+        # NOTE: detach latent in flow matching loss.
         v = self.latent_vecfield(t, l.detach()) if vecfield else None
 
+        # Unbatchify
         if not has_batch:
             x_hat = x_hat[0] if recon else None
             v = v[0] if vecfield else None

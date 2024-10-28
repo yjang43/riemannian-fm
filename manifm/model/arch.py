@@ -139,12 +139,14 @@ class LatentRectifiedFlow(nn.Module):
             x = x_or_l
             x = self._apply_manifold_constraint(x)
             l = self.encoder(t, x)
+            l_ = l.detach()
         else:
             l = x_or_l
+            l_ = l      # NOTE: Required for computation of divergence.
 
         x_hat = self.decoder(t, l) if recon else None
         # NOTE: detach latent in flow matching loss.
-        v = self.latent_vecfield(t, l.detach()) if vecfield else None
+        v = self.latent_vecfield(t, l_) if vecfield else None
 
         # Unbatchify
         if not has_batch:

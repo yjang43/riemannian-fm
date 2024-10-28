@@ -566,12 +566,12 @@ class ManifoldFMLitModule(pl.LightningModule):
                 if div_mode == "rademacher":
                     v = torch.randint(low=0, high=2, size=batch.shape).to(batch) * 2 - 1
 
-                l1, _, _ = self.model(
-                    torch.full_like(batch[..., :1], t1), batch,
-                    projl=True, vecfield=False, recon=False
-                )
+                with torch.no_grad():
+                    l1, _, _ = self.model(
+                        torch.full_like(batch[..., :1], t1), batch,
+                        projl=True, vecfield=False, recon=False
+                    )
 
-                @torch.no_grad()
                 def odefunc(t, tensor):
                     nfe[0] += 1
                     t = t.to(tensor)
@@ -622,7 +622,7 @@ class ManifoldFMLitModule(pl.LightningModule):
                 self.log("nfe", nfe[0], prog_bar=True, logger=True)
 
 
-                l0, logdetjac = state0[..., : self.dim], state0[..., -1]
+                l0, logdetjac = state0[..., : self.latent_dim], state0[..., -1]
 
                 with torch.no_grad():
                     _, _, x0 = self.model(

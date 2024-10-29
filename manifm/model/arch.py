@@ -56,55 +56,6 @@ class PositionalEncoding(nn.Module):
         return torch.cat(feature_vector, dim=-1)
 
 
-# class Unbatch(nn.Module):
-#     def __init__(self, vecfield):
-#         super().__init__()
-#         self.vecfield = vecfield
-
-#     def forward(self, t, x):
-#         has_batch = x.ndim > 1
-#         if not has_batch:
-#             x = x.reshape(1, -1)
-#             t = t.reshape(-1)
-#         v = self.vecfield(t, x)
-#         if not has_batch:
-#             v = v[0]
-#         return v
-
-
-# class ProjectToTangent(nn.Module):
-#     """Projects a vector field onto the tangent plane at the input."""
-
-#     def __init__(self, vecfield, manifold, metric_normalize):
-#         super().__init__()
-#         self.vecfield = vecfield
-#         self.manifold = manifold
-#         self.metric_normalize = metric_normalize
-
-#     def forward(self, t, x):
-#         if isinstance(self.manifold, Mesh):
-#             # Memory-efficient implementation for meshes.
-#             with torch.no_grad():
-#                 _, f_idx = closest_point(x, self.manifold.v, self.manifold.f)
-#                 vs = self.manifold.v[self.manifold.f[f_idx]]
-#                 n = face_normal(a=vs[:, 0], b=vs[:, 1], c=vs[:, 2])
-#             x = x + (n * (vs[:, 0] - x)).sum(-1, keepdim=True) * n
-#             v = self.vecfield(t, x)
-#             v = v - (n * v).sum(-1, keepdim=True) * n
-#         if isinstance(self.manifold, SPD):
-#             # projx is expensive and we can just skip it since it doesn't affect divergence.
-#             v = self.vecfield(t, x)
-#             v = self.manifold.proju(x, v)
-#         else:
-#             x = self.manifold.projx(x)
-#             v = self.vecfield(t, x)
-#             v = self.manifold.proju(x, v)
-
-#         if self.metric_normalize and hasattr(self.manifold, "metric_normalized"):
-#             v = self.manifold.metric_normalized(x, v)
-
-#         return v
-
 class LatentRectifiedFlow(nn.Module):
     def __init__(
         self,

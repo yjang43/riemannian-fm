@@ -21,7 +21,7 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks import LearningRateMonitor
 
 from manifm.datasets import get_loaders
-from manifm.model_pl import ManifoldFMLitModule
+from manifm.model_pl import ManifoldAELitModule, LatentFMLitModule
 
 torch.backends.cudnn.benchmark = True
 log = logging.getLogger(__name__)
@@ -67,15 +67,19 @@ def main(cfg: DictConfig):
     train_loader, val_loader, test_loader = get_loaders(cfg)
 
     # Construct model
-    model = ManifoldFMLitModule(cfg)
+    if cfg.get("autoencoder_ckpt", None) is None:
+        # First stage: traing autoencoder.
+        model = ManifoldAELitModule(cfg)
+    else:
+        # Second stage: train flow matching.
+        model = LatentFMLitModule(cfg)
     print(model)
 
     # Checkpointing, logging, and other misc.
     callbacks = [
         ModelCheckpoint(
             dirpath="checkpoints",
-            # monitor="val/loss_best",
-            monitor="val/neg_logprob_best",
+            monitor="val/metric_best",
             mode="min",
             filename="epoch-{epoch:03d}_step-{global_step}_loss-{val_loss:.4f}",
             auto_insert_metric_name=False,

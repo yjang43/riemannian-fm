@@ -143,7 +143,7 @@ class ManifoldAELitModule(pl.LightningModule):
         v_t_hat = v_t_hat / scale
         v_t = v_t / scale
 
-        straightness = (v_t - v_t_hat).pow(2).sum(dim=-1).mean()
+        straightness = (v_t - v_t_hat).pow(2).sum(dim=-1).mean() / self.latent_dim
 
         return straightness
 
@@ -228,6 +228,7 @@ class ManifoldAELitModule(pl.LightningModule):
         self.log("val/lat_loss", lat_loss, on_epoch=True, batch_size=batch_size)
         self.log("val/rec_loss", rec_loss, on_epoch=True, batch_size=batch_size)
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        self.log("val/straightness", straightness, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.val_metric.update(metric)
 
     def validation_epoch_end(self, outputs: List[Any]):
@@ -601,7 +602,7 @@ class LatentFMLitModule(pl.LightningModule):
             )
 
         # Solve ODE.
-        x1 = latent_odeint(self.model, x0, t=torch.linspace(0, 1, 2))[-1]
+        x1 = latent_odeint(self.model.model, x0, t=torch.linspace(0, 1, 2))[-1]
         x1 = self.manifold.projx(x1)
 
         return self.manifold.dist(x0, x1)
@@ -623,7 +624,7 @@ class LatentFMLitModule(pl.LightningModule):
         if not eval_projx and not local_coords:
             # If no projection, use adaptive step solver.
             x1 = latent_odeint(
-                self.model,
+                self.model.model,
                 x0,
                 t=torch.linspace(0, 1, 2).to(device)
             )[-1]
@@ -631,7 +632,7 @@ class LatentFMLitModule(pl.LightningModule):
             # If projection, use 1000 steps.
             x1 = projx_latent_odeint(
                 self.manifold,
-                self.model,
+                self.model.model,
                 x0,
                 t=torch.linspace(0, 1, num_steps + 1).to(device),
                 projx=eval_projx,
@@ -650,9 +651,9 @@ class LatentFMLitModule(pl.LightningModule):
             )
 
         # Solve ODE.
-        xs, _ = projx_latent_odeint(
+        xs = projx_latent_odeint(
             self.manifold,
-            self.model,
+            self.model.model,
             x0,
             t=torch.linspace(0, 1, num_steps + 1).to(device),
             projx=True,

@@ -6,7 +6,7 @@ from glob import glob
 from omegaconf import OmegaConf
 import torch
 
-from manifm.model_pl import ManifoldFMLitModule
+from manifm.model_pl import ManifoldAELitModule, LatentFMLitModule
 
 
 def get_job_directory(file_or_checkpoint: Union[str, Dict[str, Any]]) -> str:
@@ -49,6 +49,9 @@ def load_model(checkpoint: str, eval_projx=None, atol=None, rtol=None):
     if rtol is not None:
         cfg.model.rtol = rtol
 
-    model = ManifoldFMLitModule(cfg)
+    if "autoencoder_ckpt" not in cfg:
+        model = ManifoldAELitModule(cfg)
+    else:
+        model = LatentFMLitModule(cfg)
     model.load_state_dict(chkpnt["state_dict"])
     return cfg, model

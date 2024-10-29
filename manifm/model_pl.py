@@ -629,7 +629,6 @@ class LatentFMLitModule(pl.LightningModule):
                 t=torch.linspace(0, 1, 2).to(device)
             )[-1]
         else:
-            # If projection, use 1000 steps.
             x1 = projx_latent_odeint(
                 self.manifold,
                 self.model.model,
@@ -638,6 +637,15 @@ class LatentFMLitModule(pl.LightningModule):
                 projx=eval_projx,
                 local_coords=local_coords,
             )[-1]
+            # x1 = projx_latent_odeint(
+            #     self.manifold,
+            #     self.model.model,
+            #     x0,
+            #     t=torch.linspace(0, 1, num_steps + 1).to(device),
+            #     projx=False,
+            # )[-1]
+            # x1 = self.manifold.projx(x1)
+
         return x1
 
     @torch.no_grad()
@@ -658,6 +666,19 @@ class LatentFMLitModule(pl.LightningModule):
             t=torch.linspace(0, 1, num_steps + 1).to(device),
             projx=True,
         )
+        # # NOTE: projx during the ODE steps can harm the stratightness of latent space.
+        # # Solve ODE.
+        # xs = projx_latent_odeint(
+        #     self.manifold,
+        #     self.model.model,
+        #     x0,
+        #     t=torch.linspace(0, 1, num_steps + 1).to(device),
+        #     projx=False,
+        # )
+        # xs = xs.reshape(-1, self.dim)
+        # xs = self.manifold.projx(xs)
+        # xs = xs.reshape(num_steps + 1, -1, self.dim)
+
         return xs
 
     @torch.no_grad()

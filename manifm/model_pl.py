@@ -64,7 +64,8 @@ class ManifoldAELitModule(pl.LightningModule):
             self.dim,
             d_latent = cfg.model.d_latent,
             d_model=cfg.model.d_model,
-            num_layers=cfg.model.num_layers,
+            num_ae_layers=cfg.model.num_ae_layers,
+            num_fm_layers=cfg.model.num_fm_layers,
             actfn=cfg.model.actfn,
             fourier=cfg.model.get("fourier", None),
             manifold=self.manifold,
@@ -88,6 +89,7 @@ class ManifoldAELitModule(pl.LightningModule):
         self.val_metric_best = MinMetric()
 
         self.lat_scale = cfg.model.get("lat_scale", 1.0)
+        self.disc_scale = cfg.model.get("disc_scale", 1.0)
         self.cfg = cfg
 
     @property
@@ -182,27 +184,43 @@ class ManifoldAELitModule(pl.LightningModule):
         x_t, _ = vmap(cond_u)(x0, x1, t)
         x_t = x_t.reshape(N, self.dim)
 
+        l0, _, _ = self.model(torch.zeros_like(t), x0, vecfield=False, recon=False)
+        l1, _, _ = self.model(torch.ones_like(t), x1, vecfield=False, recon=False)
+
         # Get interpolated latent l_t.
-        with torch.no_grad():
-            l0, _, _ = self.model(torch.zeros_like(t), x0, vecfield=False, recon=False)
-            l1, _, _ = self.model(torch.ones_like(t), x1, vecfield=False, recon=False)
-        l_t = t*l1 + (1-t)*l0
+        l_t = t*l1.detach() + (1-t)*l0.detach()
+
+        logits = torch.concat([l0, l1], dim=0) @ self.model.decision_boundary
 
         l_t_hat, _, x_t_hat = self.model(t, x_t, vecfield=False)
         
         rec_loss = (x_t_hat - x_t).pow(2).mean() / self.dim
         lat_loss = (l_t_hat - l_t).pow(2).mean() / self.latent_dim
+        disc_loss = F.binary_cross_entropy_with_logits(
+            logits,
+            torch.concat([torch.zeros(l0.shape[0]), torch.ones(l1.shape[0])]).to(l0),
+            reduction="mean",
+        )
+        # TODO: Temporary line to check if disc is an overkill. major issue found in encoder decoder instead.
+        # disc_loss = disc_loss.detach()
+        loss = rec_loss + self.lat_scale*lat_loss + self.disc_scale*disc_loss
 
-        return (rec_loss + self.lat_scale*lat_loss, rec_loss, lat_loss)
+        return (
+            loss,
+            rec_loss,
+            lat_loss,
+            disc_loss
+        )
 
     def training_step(self, batch: Any, batch_idx: int):
-        loss, rec_loss, lat_loss = self.loss_fn(batch)
+        loss, rec_loss, lat_loss, disc_loss = self.loss_fn(batch)
 
         if torch.isfinite(loss):
             # log train metrics
-            self.log("train/lat_loss", lat_loss, on_step=True)
-            self.log("train/rec_loss", rec_loss, on_step=True)
             self.log("train/loss", loss, on_step=True)
+            self.log("train/rec_loss", rec_loss, on_step=True)
+            self.log("train/lat_loss", lat_loss, on_step=True)
+            self.log("train/disc_loss", disc_loss, on_step=True)
             self.train_metric.update(loss)
         else:
             # skip step if loss is NaN.
@@ -220,14 +238,15 @@ class ManifoldAELitModule(pl.LightningModule):
             x1 = batch["x1"]
         else:
             x1 = batch
-        loss, rec_loss, lat_loss = self.loss_fn(batch)
+        loss, rec_loss, lat_loss, disc_loss = self.loss_fn(batch)
         batch_size = x1.shape[0]
         straightness = self.compute_straightness(batch)
         metric = straightness
 
-        self.log("val/lat_loss", lat_loss, on_epoch=True, batch_size=batch_size)
-        self.log("val/rec_loss", rec_loss, on_epoch=True, batch_size=batch_size)
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        self.log("val/rec_loss", rec_loss, on_epoch=True, batch_size=batch_size)
+        self.log("val/lat_loss", lat_loss, on_epoch=True, batch_size=batch_size)
+        self.log("val/disc_loss", disc_loss, on_epoch=True, batch_size=batch_size)
         self.log("val/straightness", straightness, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.val_metric.update(metric)
 
@@ -776,7 +795,7 @@ class LatentFMLitModule(pl.LightningModule):
 
                 # Use the change of variable to compute the log prob of l0
                 @torch.no_grad()
-                def compute_logdetjac(t, x, eps=1e-8):
+                def compute_logdetjac(t, x, eps=1e-5):
                     encoder = lambda x_: self.model(
                         torch.full_like(x_[..., :1], t).to(x_), x_,
                         vecfield=False, recon=False

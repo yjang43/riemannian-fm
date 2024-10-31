@@ -80,6 +80,8 @@ class LatentRectifiedFlow(nn.Module):
             num_fm_layers, actfn, fourier)
         self.manifold = manifold
 
+        self.register_buffer("decision_boundary", torch.randn(d_latent))
+
     def forward(self, t, x_or_l, projl=True, vecfield=True, recon=True):
         # Batchify
         has_batch = x_or_l.ndim > 1

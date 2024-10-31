@@ -62,7 +62,8 @@ class LatentRectifiedFlow(nn.Module):
         d_in,
         d_latent,
         d_model,
-        num_layers,
+        num_ae_layers,
+        num_fm_layers,
         actfn,
         fourier,
         manifold
@@ -70,13 +71,13 @@ class LatentRectifiedFlow(nn.Module):
         super().__init__()
         self.encoder = tMLP(
             d_in, d_latent, d_model,
-            num_layers, actfn, fourier)
+            num_ae_layers//2, actfn, fourier)
         self.decoder = tMLP(
             d_latent, d_in, d_model,
-            num_layers, actfn, fourier)
+            num_ae_layers//2, actfn, fourier)
         self.latent_vecfield = tMLP(
             d_latent, d_latent, d_model,
-            num_layers, actfn, fourier)
+            num_fm_layers, actfn, fourier)
         self.manifold = manifold
 
     def forward(self, t, x_or_l, projl=True, vecfield=True, recon=True):

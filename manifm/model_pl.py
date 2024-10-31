@@ -296,7 +296,8 @@ class LatentFMLitModule(pl.LightningModule):
             self.dim,
             d_latent = cfg.model.d_latent,
             d_model=cfg.model.d_model,
-            num_layers=cfg.model.num_layers,
+            num_ae_layers=cfg.model.num_ae_layers,
+            num_fm_layers=cfg.model.num_fm_layers,
             actfn=cfg.model.actfn,
             fourier=cfg.model.get("fourier", None),
             manifold=self.manifold,
@@ -306,8 +307,10 @@ class LatentFMLitModule(pl.LightningModule):
             raise ValueError("autoencoder checkpoing must be provided to train second stage.")
         ckpt = torch.load(ckpt_path, map_location="cpu")
         model.load_state_dict({
-            k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()
-        })
+            k.replace("model.", ""): v
+            for k, v in ckpt["state_dict"].items()
+            if not k.startswith("model.latent_vecfield")
+        }, strict=False)
         
         self.model = EMA(
             model,
@@ -697,12 +700,13 @@ class LatentFMLitModule(pl.LightningModule):
 
             with torch.inference_mode(mode=False):
                 v = None
+                x1 = batch
                 if div_mode == "rademacher":
-                    v = torch.randint(low=0, high=2, size=batch.shape).to(batch) * 2 - 1
+                    v = torch.randint(low=0, high=2, size=x1.shape).to(x1) * 2 - 1
 
                 with torch.no_grad():
                     l1, _, _ = self.model(
-                        torch.full_like(batch[..., :1], t1), batch,
+                        torch.full_like(x1[..., :1], t1), x1,
                         projl=True, vecfield=False, recon=False
                     )
 
@@ -770,15 +774,34 @@ class LatentFMLitModule(pl.LightningModule):
                 integ_error = (x0[..., : self.dim] - x0_[..., : self.dim]).abs().max()
                 self.log("integ_error", integ_error)
 
-                # NOTE: Assume the log prob of l0 is the same as log prob of x0.
-                logp0 = self.manifold.base_logprob(x0)
-                # logp0 = torch.zeros_like(logdetjac) # Assume sampling l0 from ndim unit hyper cube.
-                logp1 = logp0 + logdetjac
+                # Use the change of variable to compute the log prob of l0
+                @torch.no_grad()
+                def compute_logdetjac(t, x, eps=1e-8):
+                    encoder = lambda x_: self.model(
+                        torch.full_like(x_[..., :1], t).to(x_), x_,
+                        vecfield=False, recon=False
+                    )[0]
+                    J = jacrev(encoder)
+                    jac = vmap(J)(x)    # (N, latent_dim, input_dim)
+                    eps = torch.eye(x.shape[-1]).to(x) * eps
+                    return .5*torch.logdet(jac.transpose(-1, -2) @ jac + eps)
+
+                # Change of variables from input manifold to latent manifold.
+                logp_x0 = self.manifold.base_logprob(x0)
+                logdetjac_x0 = compute_logdetjac(0, x0)
+                logp_l0 = logp_x0 + logdetjac_x0
+
+                # Computation of log prob of l1.
+                logp_l1 = logp_l0 + logdetjac
+
+                # Change of variables from latent manifold to input manifold.
+                logdetjac_x1 = compute_logdetjac(1, x1)
+                logp_x1 = logp_l1 - logdetjac_x1
 
                 if self.cfg.get("normalize_loglik", False):
-                    logp1 = logp1 / self.latent_dim
+                    logp_x1 = logp_x1 / self.latent_dim
 
-                return logp1
+                return logp_x1
         except:
             traceback.print_exc()
             return torch.zeros(batch.shape[0]).to(batch)

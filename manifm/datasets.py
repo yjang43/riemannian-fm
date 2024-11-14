@@ -21,6 +21,22 @@ def load_csv(filename):
     return dataset
 
 
+class ReflowEarthData(Dataset):
+    def __init__(self, dirname, filename):
+        # .npz file.
+        filename = os.path.join(dirname, filename)
+        data = np.load(filename)
+        self.x0 = torch.tensor(data["x0"])
+        self.x1 = torch.tensor(data["x1"])
+        assert self.x0.shape == self.x1.shape
+
+    def __len__(self):
+        return len(self.x0.shape[0])
+
+    def __getitem__(self, idx):
+        return {"x0": self.x0[idx], "x1": self.x1[idx]}
+
+
 class EarthData(Dataset):
     manifold = Sphere()
     dim = 3

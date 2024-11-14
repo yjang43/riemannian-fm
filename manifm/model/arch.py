@@ -92,13 +92,15 @@ class LatentRectifiedFlow(nn.Module):
         if projl:
             x = x_or_l
             x = self._apply_manifold_constraint(x)
-            l = self.encoder(t, x)
+            # l = self.encoder(t, x)
+            l = self.encoder(torch.zeros_like(t), x)
             l_ = l.detach()
         else:
             l = x_or_l
             l_ = l      # NOTE: Required for computation of divergence.
 
-        x_hat = self.decoder(t, l) if recon else None
+        # x_hat = self.decoder(t, l) if recon else None
+        x_hat = self.decoder(torch.zeros_like(t), l) if recon else None
         # NOTE: detach latent in flow matching loss.
         v = self.latent_vecfield(t, l_) if vecfield else None
 
@@ -143,12 +145,14 @@ def latent_odeint(model, x, t):
     xs = [x]
     for i in range(num_steps):
         ti, dt = t[i], t[i+1] - t[i]
-        l = model.encoder(ti, x)
+        # l = model.encoder(ti, x)
+        l = model.encoder(torch.zeros_like(ti), x)
         v = model.latent_vecfield(ti, l)
 
         # Extrapolate latent.
         l = l + v * dt
-        x = model.decoder(ti, l)
+        # x = model.decoder(ti, l)
+        x = model.decoder(torch.zeros_like(ti), l)
         xs.append(x)
 
     xs = torch.stack(xs, dim=0)
@@ -162,12 +166,14 @@ def projx_latent_odeint(manifold, model, x, t, projx=True, local_coords=False):
     xs = [x]
     for i in range(num_steps):
         ti, dt = t[i], t[i+1] - t[i]
-        l = model.encoder(ti, x)
+        # l = model.encoder(ti, x)
+        l = model.encoder(torch.zeros_like(ti), x)
         v = model.latent_vecfield(ti, l)
 
         # Extrapolate latent.
         l = l + v * dt
-        x = model.decoder(ti, l)
+        # x = model.decoder(ti, l)
+        x = model.decoder(torch.zeros_like(ti), l)
         if projx:
             x = manifold.projx(x)
         xs.append(x)

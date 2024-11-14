@@ -6,7 +6,9 @@ import traceback
 import numpy as np
 import matplotlib.pyplot as plt
 import geopandas
-from shapely.geometry import Point
+from shapely.geometry import Point, LineString
+from scipy.optimize import linear_sum_assignment
+import wandb
 
 from tqdm import tqdm
 
@@ -16,6 +18,7 @@ from torchmetrics import MeanMetric, MinMetric
 import pytorch_lightning as pl
 from torch.func import vjp, jvp, vmap, jacrev
 from torchdiffeq import odeint
+from pytorch_lightning.loggers import WandbLogger
 
 from manifm.datasets import get_manifold
 from manifm.ema import EMA
@@ -88,8 +91,8 @@ class ManifoldAELitModule(pl.LightningModule):
         self.test_metric = MeanMetric()
         self.val_metric_best = MinMetric()
 
-        self.lat_scale = cfg.model.get("lat_scale", 1.0)
-        self.disc_scale = cfg.model.get("disc_scale", 1.0)
+        self.lat_scale = cfg.get("lat_scale", 1.0)
+        self.disc_scale = cfg.get("disc_scale", 1.0)
         self.cfg = cfg
 
     @property
@@ -152,6 +155,88 @@ class ManifoldAELitModule(pl.LightningModule):
     def loss_fn(self, batch: torch.Tensor):
         return self.ae_loss_fn(batch)
 
+    # def ae_loss_fn(self, batch: torch.Tensor):
+    #     """Compute auto-encoder loss which includes reconstruction loss and latent loss.
+    #     This is the first stage of the latent rectified flow training.
+    #     Args:
+    #         batch (torch.Tensor): Batch of data.
+    #     Returns:
+    #         ae_loss: rec_loss + alpha * lat_loss.
+    #         rec_loss: Reconstruction loss.
+    #         lat_loss: Latent loss.
+    #     """
+
+    #     if isinstance(batch, dict):
+    #         x0 = batch["x0"]
+    #         x1 = batch["x1"]
+    #     else:
+    #         x1 = batch
+    #         x0 = self.manifold.random_base(x1.shape[0], self.dim).to(x1)
+
+    #     N = x1.shape[0]
+
+    #     # TODO: Expand the types of manifold and process x_t accordingly.
+    #     # NOTE: Consider simple geometry only for now.
+    #     t = torch.rand(N).reshape(-1, 1).to(x1)
+
+    #     def cond_u(x0, x1, t):
+    #         path = geodesic(self.manifold, x0, x1)
+    #         x_t, u_t = jvp(path, (t,), (torch.ones_like(t).to(t),))
+    #         return x_t, u_t
+
+    #     x_t, _ = vmap(cond_u)(x0, x1, t)
+    #     x_t = x_t.reshape(N, self.dim)
+
+    #     # with torch.no_grad():
+    #     #     l0, _, _ = self.model(torch.zeros_like(t), x0, vecfield=False, recon=False)
+    #     #     l1, _, _ = self.model(torch.ones_like(t), x1, vecfield=False, recon=False)
+    #     l0, _, _ = self.model(torch.zeros_like(t), x0, vecfield=False, recon=False)
+    #     l1, _, _ = self.model(torch.ones_like(t), x1, vecfield=False, recon=False)
+
+    #     # # Get interpolated latent l_t.
+    #     # l_t = t*l1 + (1-t)*l0
+    #     # Get interpolated latent l_t.
+    #     l_t = t*l1.detach() + (1-t)*l0.detach()
+
+    #     logits = torch.concat([l0, l1], dim=0) @ self.model.decision_boundary
+    #     # logits = l1 @ self.model.decision_boundary
+
+    #     l_t_hat, _, x_t_hat = self.model(t, x_t, vecfield=False)
+        
+    #     rec_loss = (x_t_hat - x_t).pow(2).mean() / self.dim
+    #     lat_loss = (l_t_hat - l_t).pow(2).mean() / self.latent_dim
+    #     # # NOTE: Consider using SVM.
+    #     # disc_loss = torch.clamp(
+    #     #     1 - logits * torch.concat([
+    #     #         -torch.ones(l0.shape[0]).to(l0),
+    #     #         torch.ones(l1.shape[0]).to(l1)]),
+    #     #     min=0
+    #     # ).mean()
+    #     # disc_loss = torch.clamp(1 - logits * torch.ones(l1.shape[0]).to(l1), min=0).mean()
+
+    #     # # NOTE: logistic regression
+    #     # disc_loss = F.binary_cross_entropy_with_logits(
+    #     #     logits,
+    #     #     torch.concat([torch.zeros(l0.shape[0]), torch.ones(l1.shape[0])]).to(l0),
+    #     #     reduction="mean",
+    #     # )
+
+    #     # NOTE: Can constraint to maintain proportianal distacne between l0 and l1 and x0 and x1 will help?
+    #     dist = self.manifold.dist(x0, x1)
+    #     dist_hat = (l1 - l0).norm(dim=-1)
+    #     lat_loss = (dist - dist_hat).pow(2).mean() / self.latent_dim
+    #     disc_loss = 0
+
+    #     loss = rec_loss + self.lat_scale*lat_loss + self.disc_scale*disc_loss
+    #     # loss = rec_loss + self.lat_scale*lat_loss
+
+    #     return (
+    #         loss,
+    #         rec_loss,
+    #         lat_loss,
+    #         disc_loss
+    #     )
+
     def ae_loss_fn(self, batch: torch.Tensor):
         """Compute auto-encoder loss which includes reconstruction loss and latent loss.
         This is the first stage of the latent rectified flow training.
@@ -164,45 +249,29 @@ class ManifoldAELitModule(pl.LightningModule):
         """
 
         if isinstance(batch, dict):
-            x0 = batch["x0"]
-            x1 = batch["x1"]
-        else:
-            x1 = batch
-            x0 = self.manifold.random_base(x1.shape[0], self.dim).to(x1)
+            batch = batch["x1"]
 
-        N = x1.shape[0]
+        N = batch.shape[0]
+        x0 = self.manifold.random_base(N, self.dim).to(batch)
+        x1 = self.manifold.random_base(N, self.dim).to(batch)
 
         # TODO: Expand the types of manifold and process x_t accordingly.
         # NOTE: Consider simple geometry only for now.
         t = torch.rand(N).reshape(-1, 1).to(x1)
 
-        def cond_u(x0, x1, t):
-            path = geodesic(self.manifold, x0, x1)
-            x_t, u_t = jvp(path, (t,), (torch.ones_like(t).to(t),))
-            return x_t, u_t
-
-        x_t, _ = vmap(cond_u)(x0, x1, t)
-        x_t = x_t.reshape(N, self.dim)
-
-        l0, _, _ = self.model(torch.zeros_like(t), x0, vecfield=False, recon=False)
+        l0, _, x0_hat = self.model(torch.zeros_like(t), x0, vecfield=False, recon=True)
         l1, _, _ = self.model(torch.ones_like(t), x1, vecfield=False, recon=False)
 
-        # Get interpolated latent l_t.
-        l_t = t*l1.detach() + (1-t)*l0.detach()
+        dist = self.manifold.dist(x0, x1)
+        dist_hat = (l1 - l0).norm(dim=-1)
+        stress_loss = (dist_hat - dist).pow(2).mean()
 
-        logits = torch.concat([l0, l1], dim=0) @ self.model.decision_boundary
+        rec_loss = (x0_hat - x0).pow(2).mean() / self.dim
 
-        l_t_hat, _, x_t_hat = self.model(t, x_t, vecfield=False)
-        
-        rec_loss = (x_t_hat - x_t).pow(2).mean() / self.dim
-        lat_loss = (l_t_hat - l_t).pow(2).mean() / self.latent_dim
-        disc_loss = F.binary_cross_entropy_with_logits(
-            logits,
-            torch.concat([torch.zeros(l0.shape[0]), torch.ones(l1.shape[0])]).to(l0),
-            reduction="mean",
-        )
-        # TODO: Temporary line to check if disc is an overkill. major issue found in encoder decoder instead.
-        # disc_loss = disc_loss.detach()
+        rec_loss = rec_loss
+        lat_loss = stress_loss
+        disc_loss = 0
+
         loss = rec_loss + self.lat_scale*lat_loss + self.disc_scale*disc_loss
 
         return (
@@ -214,6 +283,7 @@ class ManifoldAELitModule(pl.LightningModule):
 
     def training_step(self, batch: Any, batch_idx: int):
         loss, rec_loss, lat_loss, disc_loss = self.loss_fn(batch)
+        # loss, rec_loss, lat_loss = self.loss_fn(batch)
 
         if torch.isfinite(loss):
             # log train metrics
@@ -239,6 +309,7 @@ class ManifoldAELitModule(pl.LightningModule):
         else:
             x1 = batch
         loss, rec_loss, lat_loss, disc_loss = self.loss_fn(batch)
+        # loss, rec_loss, lat_loss = self.loss_fn(batch)
         batch_size = x1.shape[0]
         straightness = self.compute_straightness(batch)
         metric = straightness
@@ -300,10 +371,10 @@ class ManifoldAELitModule(pl.LightningModule):
                 "optimizer": optimizer,
             }
 
-    def optimizer_step(self, *args, **kwargs):
-        super().optimizer_step(*args, **kwargs)
-        if isinstance(self.model, EMA):
-            self.model.update_ema()
+    # def optimizer_step(self, *args, **kwargs):
+    #     super().optimizer_step(*args, **kwargs)
+    #     if isinstance(self.model, EMA):
+    #         self.model.update_ema()
 
 class LatentFMLitModule(pl.LightningModule):
     def __init__(self, cfg):
@@ -342,6 +413,7 @@ class LatentFMLitModule(pl.LightningModule):
         self.val_metric_best = MinMetric()
 
         self.cfg = cfg
+        self.i = 0
 
     @property
     def device(self):
@@ -802,8 +874,12 @@ class LatentFMLitModule(pl.LightningModule):
                     )[0]
                     J = jacrev(encoder)
                     jac = vmap(J)(x)    # (N, latent_dim, input_dim)
-                    eps = torch.eye(x.shape[-1]).to(x) * eps
-                    return .5*torch.logdet(jac.transpose(-1, -2) @ jac + eps)
+                    u, s, vh = torch.svd(jac)
+                    s = s + eps
+                    return torch.sum(torch.log(s), dim=-1)
+
+                    # eps = torch.eye(x.shape[-1]).to(x) * eps
+                    # return .5*torch.logdet(jac.transpose(-1, -2) @ jac + eps)
 
                 # Change of variables from input manifold to latent manifold.
                 logp_x0 = self.manifold.base_logprob(x0)
@@ -816,6 +892,7 @@ class LatentFMLitModule(pl.LightningModule):
                 # Change of variables from latent manifold to input manifold.
                 logdetjac_x1 = compute_logdetjac(1, x1)
                 logp_x1 = logp_l1 - logdetjac_x1
+                # logp_x1 = self.manifold.base_logprob(x0) + logdetjac
 
                 if self.cfg.get("normalize_loglik", False):
                     logp_x1 = logp_x1 / self.latent_dim
@@ -827,6 +904,31 @@ class LatentFMLitModule(pl.LightningModule):
 
     def loss_fn(self, batch: torch.Tensor):
         return self.fm_loss_fn(batch)
+
+
+    def bipartite_matching(self, l0, l1):
+        """Assigns each sample from l0 to a sample in l1 based on maximum alignment
+        with the decision boundary.
+
+        Args:
+            l0: Latent samples of source distribution.
+            l1: Latent samples of target distribution.
+
+        Returns:
+            idx_map: Array of indices mapping each sample in l0 to a sample in l1.
+        """
+        l0, l1 = l0.detach().cpu(), l1.detach().cpu()
+        decision_boundary = self.model.model.decision_boundary.cpu()
+
+        # Make l0 x l1
+        c = l1.unsqueeze(0) - l0.unsqueeze(1)
+        c = c / c.norm(dim=-1, keepdim=True)
+        c = c @ decision_boundary
+
+        _, idx_map = linear_sum_assignment(c, maximize=True)
+        return idx_map
+
+
 
     def fm_loss_fn(self, batch: torch.Tensor):
         """Compute flow matching loss on the latent space.
@@ -862,16 +964,23 @@ class LatentFMLitModule(pl.LightningModule):
         with torch.no_grad():
             l0, _, _ = self.model(torch.zeros_like(t), x0, vecfield=False, recon=False)
             l1, _, _ = self.model(torch.ones_like(t), x1, vecfield=False, recon=False)
+
+            if self.cfg.get("bipartite_matching", False):
+                # NOTE: Assign l0 to l1 as parallel as possible to decision boundary.
+                l1_idx = self.bipartite_matching(l0, l1)
+                l1 = l1[l1_idx]
+
             l_t, _, _ = self.model(t, x_t, vecfield=False, recon=False)
         # NOTE: v_t = (l1 - lt) / (1 - t) can be used. This may correct the error cascaded from the first stage.
         # v_t = l1 - l0
         v_t = (l1 - l_t) / (1 - t)
 
+
         # NOTE: Check error cascaded from the first stage.
         real_l_t = t*l1 + (1-t)*l0
         self.log("debug/l_t_error", (real_l_t - l_t).pow(2).mean(), on_step=True)
 
-        _, v_t_hat, _ =self.model(t, l_t, projl=False, recon=False)
+        _, v_t_hat, _ = self.model(t, l_t, projl=False, recon=False)
         
         fm_loss = (v_t_hat - v_t).pow(2).mean() / self.latent_dim
 
@@ -895,6 +1004,39 @@ class LatentFMLitModule(pl.LightningModule):
         self.train_metric.reset()
 
     def validation_step(self, batch: Any, batch_idx: int):
+
+        # Debug training process.
+        def plot_earth2d():
+            world = geopandas.read_file(geopandas.datasets.get_path("naturalearth_lowres"))
+            ax = world.plot(figsize=(9, 4), antialiased=False, color="grey")
+            x0 = torch.tensor([[ 0.5740, -0.1093, -0.8115]])
+            for num_steps, color in [(100, "red"), (10, "blue"), (4, "green")]:
+                pts = self.sample_all(1, self.device, x0.to(self.device), num_steps)
+                pts = pts.detach().cpu()
+                geometry = [Point(lonlat_from_cartesian(x) / np.pi * 180) for x in pts]
+                pts = geopandas.GeoDataFrame(geometry=geometry)
+                pts.plot(ax=ax, color=color, markersize=0.1, alpha=0.7)
+                # Create LineStrings between consecutive points
+                lines = [
+                    LineString([geometry[i], geometry[i + 1]]) for i in range(len(geometry) - 1)
+                ]
+                line_gdf = geopandas.GeoDataFrame(geometry=lines)
+
+                # Plot lines connecting points
+                line_gdf.plot(ax=ax, color=color, linewidth=0.5, alpha=0.5)
+            return ax.get_figure(), ax
+
+        if self.cfg.get("use_wandb", False):
+            fig, ax = plot_earth2d()
+            logger: WandbLogger = self.loggers[-1]
+            logger.log_image("debug/path", [wandb.Image(fig)])
+        else:
+            fig, ax = plot_earth2d()
+            os.makedirs("fig", exist_ok=True)
+            fig.savefig(f"fig/{self.i}.png")
+            self.i += 1
+        # return
+
         if isinstance(batch, dict):
             x1 = batch["x1"]
         else:

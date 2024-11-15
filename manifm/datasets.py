@@ -22,6 +22,9 @@ def load_csv(filename):
 
 
 class ReflowEarthData(Dataset):
+    manifold = Sphere()
+    dim = 3
+
     def __init__(self, dirname, filename):
         # .npz file.
         filename = os.path.join(dirname, filename)
@@ -31,7 +34,7 @@ class ReflowEarthData(Dataset):
         assert self.x0.shape == self.x1.shape
 
     def __len__(self):
-        return len(self.x0.shape[0])
+        return self.x0.shape[0]
 
     def __getitem__(self, idx):
         return {"x0": self.x0[idx], "x1": self.x1[idx]}
@@ -358,7 +361,10 @@ class ExpandDataset(Dataset):
 
 def _get_dataset(cfg):
     expand_factor = 1
-    if cfg.data == "volcano":
+    if cfg.data == "reflow_fire":
+        dataset = ReflowEarthData(cfg.get("datadir", None), "reflow_fire.npz")
+        expand_factor = 100
+    elif cfg.data == "volcano":
         dataset = Volcano(cfg.get("earth_datadir", cfg.get("datadir", None)))
         expand_factor = 1550
     elif cfg.data == "earthquake":

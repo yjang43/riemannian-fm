@@ -49,9 +49,12 @@ def load_model(checkpoint: str, eval_projx=None, atol=None, rtol=None):
     if rtol is not None:
         cfg.model.rtol = rtol
 
-    if "autoencoder_ckpt" not in cfg:
-        model = ManifoldAELitModule(cfg)
-    else:
+    if (
+        "ckpt" in cfg
+        or "autoencoder_ckpt" in cfg    # NOTE: Deprectated. For compatibility.
+    ):
         model = LatentFMLitModule(cfg)
+    else:
+        model = ManifoldAELitModule(cfg)
     model.load_state_dict(chkpnt["state_dict"], strict=False)
     return cfg, model

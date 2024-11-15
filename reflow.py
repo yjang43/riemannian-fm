@@ -40,7 +40,7 @@ def main(cfg):
         x0[batch_size*i: batch_size*i + N] = x0_
         x1[batch_size*i: batch_size*i + N] = x1_
 
-    np.savez(f"{datadir}/reflow_{data}.npz", x0=x0, x1=x1)
+    np.savez(f"{datadir}/reflow_{data}.npz", x0=x0, x1=x1, ckpt=os.path.abspath(ckpt_path))
 
 
 if __name__ == "__main__":

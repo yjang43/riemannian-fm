@@ -392,15 +392,16 @@ class LatentFMLitModule(pl.LightningModule):
             fourier=cfg.model.get("fourier", None),
             manifold=self.manifold,
         )
-        ckpt_path = cfg.get("autoencoder_ckpt", "")
+        ckpt_path = cfg.get("ckpt", None)
+        if ckpt_path is None:   # NOTE: Will be deprecated.
+            ckpt_path = cfg.get("autoencoder_ckpt", None)
         if not ckpt_path:
-            raise ValueError("autoencoder checkpoing must be provided to train second stage.")
+            raise ValueError("autoencoder checkpoint must be provided to train second stage.")
         ckpt = torch.load(ckpt_path, map_location="cpu")
         model.load_state_dict({
             k.replace("model.", ""): v
             for k, v in ckpt["state_dict"].items()
-            if not k.startswith("model.latent_vecfield")
-        }, strict=False)
+        }, strict=cfg.get("reflow", False))
         
         self.model = EMA(
             model,

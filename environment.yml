@@ -1,4 +1,4 @@
-name: manifm
+name: lrf
 channels:
   - pytorch
   - conda-forge
@@ -6,7 +6,7 @@ channels:
 dependencies:
   - python=3.9
   - pytorch
-  - pytorch-cuda=11.7
+  - pytorch-cuda=12.1
   - igl
   - meshplot
   - matplotlib

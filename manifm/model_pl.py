@@ -91,8 +91,7 @@ class ManifoldAELitModule(pl.LightningModule):
         self.test_metric = MeanMetric()
         self.val_metric_best = MinMetric()
 
-        self.lat_scale = cfg.get("lat_scale", 1.0)
-        self.disc_scale = cfg.get("disc_scale", 1.0)
+        self.iso_scale = cfg.optim.get("iso_scale", 1.0)
         self.cfg = cfg
 
     @property
@@ -116,35 +115,26 @@ class ManifoldAELitModule(pl.LightningModule):
         x1, x0 = x1.cpu(), x0.cpu()    # Load to CPU and later load to GPU.
         N = x1.shape[0]
 
-        def cond_u(x0, x1, t):
-            path = geodesic(self.manifold, x0, x1)
-            x_t, u_t = jvp(path, (t,), (torch.ones_like(t).to(t),))
-            return x_t, u_t
+        path = geodesic(self.manifold, x0, x1)
+        t = torch.linspace(0, 1, num_steps + 1).reshape(-1, 1)
 
-        t_ = torch.linspace(0, 1, num_steps + 1).reshape(-1, 1)
-
-        # Repeat elements num_steps times.
-        x0 = x0.repeat_interleave(num_steps + 1, dim=0)     # (N*(num_steps+1), dim)
-        x1 = x1.repeat_interleave(num_steps + 1, dim=0)     # (N*(num_steps+1), dim)
-        t = t_.repeat(N, 1)                                 # (N*(num_steps+1), 1)
-
-        x_t, _ = vmap(cond_u)(x0, x1, t)    # NOTE: Might cause a computation bottleneck or OOM.
-        x_t = x_t.reshape(N, num_steps + 1, self.dim).permute(1, 0, 2)  # (num_steps+1, N, dim)
+        x_t = vmap(path)(t)
+        x_t = x_t.reshape(num_steps + 1, N, self.dim)
 
         l_t = []
         for i, x_t_ in enumerate(x_t):
             l_t_, _, _ = self.model(
-                t_[i: i+1, :].repeat(N, 1).to(self.device), x_t_.to(self.device),
+                t[i: i+1, :].repeat(N, 1).to(self.device), x_t_.to(self.device),
                 vecfield=False, recon=False)
             l_t.append(l_t_.cpu())
         l_t = torch.stack(l_t, dim=0).permute(1, 0, 2)      # (N, num_steps+1, dim)
 
-        dt = (t_[1:, :] - t_[:-1, :]).view(1, -1, 1)        # (1, num_steps, 1)
+        dt = (t[1:, :] - t[:-1, :]).view(1, -1, 1)        # (1, num_steps, 1)
         v_t_hat = (l_t[:, 1:, :] - l_t[:, :-1, :]) / dt     # (N, num_steps, dim)
         v_t = (l_t[:, -1:, :] - l_t[:, :1, :]).repeat(1, num_steps, 1)    # v_t = l1 - l0
 
         # Normalize by setting norm of v_t to 1.
-        scale = (l_t[:, -1:, :] - l_t[:, :1, :]).norm(dim=-1, keepdim=True)
+        scale = v_t.norm(dim=-1, keepdim=True)
         v_t_hat = v_t_hat / scale
         v_t = v_t / scale
 
@@ -155,97 +145,15 @@ class ManifoldAELitModule(pl.LightningModule):
     def loss_fn(self, batch: torch.Tensor):
         return self.ae_loss_fn(batch)
 
-    # def ae_loss_fn(self, batch: torch.Tensor):
-    #     """Compute auto-encoder loss which includes reconstruction loss and latent loss.
-    #     This is the first stage of the latent rectified flow training.
-    #     Args:
-    #         batch (torch.Tensor): Batch of data.
-    #     Returns:
-    #         ae_loss: rec_loss + alpha * lat_loss.
-    #         rec_loss: Reconstruction loss.
-    #         lat_loss: Latent loss.
-    #     """
-
-    #     if isinstance(batch, dict):
-    #         x0 = batch["x0"]
-    #         x1 = batch["x1"]
-    #     else:
-    #         x1 = batch
-    #         x0 = self.manifold.random_base(x1.shape[0], self.dim).to(x1)
-
-    #     N = x1.shape[0]
-
-    #     # TODO: Expand the types of manifold and process x_t accordingly.
-    #     # NOTE: Consider simple geometry only for now.
-    #     t = torch.rand(N).reshape(-1, 1).to(x1)
-
-    #     def cond_u(x0, x1, t):
-    #         path = geodesic(self.manifold, x0, x1)
-    #         x_t, u_t = jvp(path, (t,), (torch.ones_like(t).to(t),))
-    #         return x_t, u_t
-
-    #     x_t, _ = vmap(cond_u)(x0, x1, t)
-    #     x_t = x_t.reshape(N, self.dim)
-
-    #     # with torch.no_grad():
-    #     #     l0, _, _ = self.model(torch.zeros_like(t), x0, vecfield=False, recon=False)
-    #     #     l1, _, _ = self.model(torch.ones_like(t), x1, vecfield=False, recon=False)
-    #     l0, _, _ = self.model(torch.zeros_like(t), x0, vecfield=False, recon=False)
-    #     l1, _, _ = self.model(torch.ones_like(t), x1, vecfield=False, recon=False)
-
-    #     # # Get interpolated latent l_t.
-    #     # l_t = t*l1 + (1-t)*l0
-    #     # Get interpolated latent l_t.
-    #     l_t = t*l1.detach() + (1-t)*l0.detach()
-
-    #     logits = torch.concat([l0, l1], dim=0) @ self.model.decision_boundary
-    #     # logits = l1 @ self.model.decision_boundary
-
-    #     l_t_hat, _, x_t_hat = self.model(t, x_t, vecfield=False)
-        
-    #     rec_loss = (x_t_hat - x_t).pow(2).mean() / self.dim
-    #     lat_loss = (l_t_hat - l_t).pow(2).mean() / self.latent_dim
-    #     # # NOTE: Consider using SVM.
-    #     # disc_loss = torch.clamp(
-    #     #     1 - logits * torch.concat([
-    #     #         -torch.ones(l0.shape[0]).to(l0),
-    #     #         torch.ones(l1.shape[0]).to(l1)]),
-    #     #     min=0
-    #     # ).mean()
-    #     # disc_loss = torch.clamp(1 - logits * torch.ones(l1.shape[0]).to(l1), min=0).mean()
-
-    #     # # NOTE: logistic regression
-    #     # disc_loss = F.binary_cross_entropy_with_logits(
-    #     #     logits,
-    #     #     torch.concat([torch.zeros(l0.shape[0]), torch.ones(l1.shape[0])]).to(l0),
-    #     #     reduction="mean",
-    #     # )
-
-    #     # NOTE: Can constraint to maintain proportianal distacne between l0 and l1 and x0 and x1 will help?
-    #     dist = self.manifold.dist(x0, x1)
-    #     dist_hat = (l1 - l0).norm(dim=-1)
-    #     lat_loss = (dist - dist_hat).pow(2).mean() / self.latent_dim
-    #     disc_loss = 0
-
-    #     loss = rec_loss + self.lat_scale*lat_loss + self.disc_scale*disc_loss
-    #     # loss = rec_loss + self.lat_scale*lat_loss
-
-    #     return (
-    #         loss,
-    #         rec_loss,
-    #         lat_loss,
-    #         disc_loss
-    #     )
-
     def ae_loss_fn(self, batch: torch.Tensor):
-        """Compute auto-encoder loss which includes reconstruction loss and latent loss.
+        """Compute auto-encoder loss which includes reconstruction loss and isometry loss.
         This is the first stage of the latent rectified flow training.
         Args:
             batch (torch.Tensor): Batch of data.
         Returns:
-            ae_loss: rec_loss + alpha * lat_loss.
+            ae_loss: rec_loss + alpha * iso_loss.
             rec_loss: Reconstruction loss.
-            lat_loss: Latent loss.
+            iso_loss: Latent loss.
         """
 
         if isinstance(batch, dict):
@@ -257,40 +165,34 @@ class ManifoldAELitModule(pl.LightningModule):
 
         # TODO: Expand the types of manifold and process x_t accordingly.
         # NOTE: Consider simple geometry only for now.
-        t = torch.rand(N).reshape(-1, 1).to(x1)
 
-        l0, _, x0_hat = self.model(torch.zeros_like(t), x0, vecfield=False, recon=True)
-        l1, _, _ = self.model(torch.ones_like(t), x1, vecfield=False, recon=False)
+        # t = torch.rand(N).reshape(-1, 1).to(x1)
+
+        l0, _, x0_hat = self.model(None, x0, vecfield=False, recon=True)
+        l1, _, _ = self.model(None, x1, vecfield=False, recon=False)
 
         dist = self.manifold.dist(x0, x1)
         dist_hat = (l1 - l0).norm(dim=-1)
-        stress_loss = (dist_hat - dist).pow(2).mean()
+        iso_loss = (dist_hat - dist).pow(2).mean()
 
         rec_loss = (x0_hat - x0).pow(2).mean() / self.dim
-
         rec_loss = rec_loss
-        lat_loss = stress_loss
-        disc_loss = 0
 
-        loss = rec_loss + self.lat_scale*lat_loss + self.disc_scale*disc_loss
+        loss = rec_loss + self.iso_scale*iso_loss
 
         return (
             loss,
             rec_loss,
-            lat_loss,
-            disc_loss
+            iso_loss
         )
-
     def training_step(self, batch: Any, batch_idx: int):
-        loss, rec_loss, lat_loss, disc_loss = self.loss_fn(batch)
-        # loss, rec_loss, lat_loss = self.loss_fn(batch)
+        loss, rec_loss, iso_loss = self.loss_fn(batch)
 
         if torch.isfinite(loss):
             # log train metrics
             self.log("train/loss", loss, on_step=True)
             self.log("train/rec_loss", rec_loss, on_step=True)
-            self.log("train/lat_loss", lat_loss, on_step=True)
-            self.log("train/disc_loss", disc_loss, on_step=True)
+            self.log("train/iso_loss", iso_loss, on_step=True)
             self.train_metric.update(loss)
         else:
             # skip step if loss is NaN.
@@ -308,16 +210,14 @@ class ManifoldAELitModule(pl.LightningModule):
             x1 = batch["x1"]
         else:
             x1 = batch
-        loss, rec_loss, lat_loss, disc_loss = self.loss_fn(batch)
-        # loss, rec_loss, lat_loss = self.loss_fn(batch)
+        loss, rec_loss, iso_loss = self.loss_fn(batch)
         batch_size = x1.shape[0]
         straightness = self.compute_straightness(batch)
         metric = straightness
 
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.log("val/rec_loss", rec_loss, on_epoch=True, batch_size=batch_size)
-        self.log("val/lat_loss", lat_loss, on_epoch=True, batch_size=batch_size)
-        self.log("val/disc_loss", disc_loss, on_epoch=True, batch_size=batch_size)
+        self.log("val/iso_loss", iso_loss, on_epoch=True, batch_size=batch_size)
         self.log("val/straightness", straightness, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.val_metric.update(metric)
 
@@ -333,9 +233,6 @@ class ManifoldAELitModule(pl.LightningModule):
         self.val_metric.reset()
 
     def test_step(self, batch: Any, batch_idx: int):
-        # TODO: Fix the bug?
-        # # RuntimeError: Batching rule not implemented for aten::_make_dual; the fallback path doesn't work on out= or view ops.
-        # loss, _, _ = self.loss_fn(batch)
         batch_size = batch.shape[0]
         straightness = self.compute_straightness(batch)
         metric = straightness
@@ -393,8 +290,6 @@ class LatentFMLitModule(pl.LightningModule):
             manifold=self.manifold,
         )
         ckpt_path = cfg.get("ckpt", None)
-        if ckpt_path is None:   # NOTE: Will be deprecated.
-            ckpt_path = cfg.get("autoencoder_ckpt", None)
         if not ckpt_path:
             raise ValueError("autoencoder checkpoint must be provided to train second stage.")
         ckpt = torch.load(ckpt_path, map_location="cpu")
@@ -402,7 +297,11 @@ class LatentFMLitModule(pl.LightningModule):
             k.replace("model.", ""): v
             for k, v in ckpt["state_dict"].items()
         }, strict=cfg.get("reflow", False))
-        
+
+        # Freeze encoder.
+        for p in model.encoder.parameters():
+            p.requires_grad = False
+
         self.model = EMA(
             model,
             cfg.optim.ema_decay,
@@ -414,7 +313,7 @@ class LatentFMLitModule(pl.LightningModule):
         self.val_metric_best = MinMetric()
 
         self.cfg = cfg
-        self.i = 0
+        # self.i = 0
 
     @property
     def device(self):
@@ -732,14 +631,7 @@ class LatentFMLitModule(pl.LightningModule):
                 projx=eval_projx,
                 local_coords=local_coords,
             )[-1]
-            # x1 = projx_latent_odeint(
-            #     self.manifold,
-            #     self.model.model,
-            #     x0,
-            #     t=torch.linspace(0, 1, num_steps + 1).to(device),
-            #     projx=False,
-            # )[-1]
-            # x1 = self.manifold.projx(x1)
+            x1 = self.manifold.projx(x1)
 
         return x1
 
@@ -761,18 +653,6 @@ class LatentFMLitModule(pl.LightningModule):
             t=torch.linspace(0, 1, num_steps + 1).to(device),
             projx=True,
         )
-        # # NOTE: projx during the ODE steps can harm the stratightness of latent space.
-        # # Solve ODE.
-        # xs = projx_latent_odeint(
-        #     self.manifold,
-        #     self.model.model,
-        #     x0,
-        #     t=torch.linspace(0, 1, num_steps + 1).to(device),
-        #     projx=False,
-        # )
-        # xs = xs.reshape(-1, self.dim)
-        # xs = self.manifold.projx(xs)
-        # xs = xs.reshape(num_steps + 1, -1, self.dim)
 
         return xs
 
@@ -879,9 +759,6 @@ class LatentFMLitModule(pl.LightningModule):
                     s = s + eps
                     return torch.sum(torch.log(s), dim=-1)
 
-                    # eps = torch.eye(x.shape[-1]).to(x) * eps
-                    # return .5*torch.logdet(jac.transpose(-1, -2) @ jac + eps)
-
                 # Change of variables from input manifold to latent manifold.
                 logp_x0 = self.manifold.base_logprob(x0)
                 logdetjac_x0 = compute_logdetjac(0, x0)
@@ -905,31 +782,6 @@ class LatentFMLitModule(pl.LightningModule):
 
     def loss_fn(self, batch: torch.Tensor):
         return self.fm_loss_fn(batch)
-
-
-    def bipartite_matching(self, l0, l1):
-        """Assigns each sample from l0 to a sample in l1 based on maximum alignment
-        with the decision boundary.
-
-        Args:
-            l0: Latent samples of source distribution.
-            l1: Latent samples of target distribution.
-
-        Returns:
-            idx_map: Array of indices mapping each sample in l0 to a sample in l1.
-        """
-        l0, l1 = l0.detach().cpu(), l1.detach().cpu()
-        decision_boundary = self.model.model.decision_boundary.cpu()
-
-        # Make l0 x l1
-        c = l1.unsqueeze(0) - l0.unsqueeze(1)
-        c = c / c.norm(dim=-1, keepdim=True)
-        c = c @ decision_boundary
-
-        _, idx_map = linear_sum_assignment(c, maximize=True)
-        return idx_map
-
-
 
     def fm_loss_fn(self, batch: torch.Tensor):
         """Compute flow matching loss on the latent space.
@@ -972,14 +824,14 @@ class LatentFMLitModule(pl.LightningModule):
                 l1 = l1[l1_idx]
 
             l_t, _, _ = self.model(t, x_t, vecfield=False, recon=False)
-        # NOTE: v_t = (l1 - lt) / (1 - t) can be used. This may correct the error cascaded from the first stage.
         # v_t = l1 - l0
+        # NOTE: This correct the error cascaded from the autoencoder.
         v_t = (l1 - l_t) / (1 - t)
 
 
-        # NOTE: Check error cascaded from the first stage.
+        # NOTE: Check error cascaded from the autoencoder.
         real_l_t = t*l1 + (1-t)*l0
-        self.log("debug/l_t_error", (real_l_t - l_t).pow(2).mean(), on_step=True)
+        self.log("debug/l_t_error", (real_l_t - l_t).pow(2).mean())
 
         _, v_t_hat, _ = self.model(t, l_t, projl=False, recon=False)
         
@@ -1031,12 +883,6 @@ class LatentFMLitModule(pl.LightningModule):
             fig, ax = plot_earth2d()
             logger: WandbLogger = self.loggers[-1]
             logger.log_image("debug/path", [wandb.Image(fig)])
-        else:
-            fig, ax = plot_earth2d()
-            os.makedirs("fig", exist_ok=True)
-            fig.savefig(f"fig/{self.i}.png")
-            self.i += 1
-        # return
 
         if isinstance(batch, dict):
             x1 = batch["x1"]

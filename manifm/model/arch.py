@@ -16,6 +16,23 @@ ACTFNS = {
     "srelu": Softplus,
 }
 
+class Swish(nn.Module):
+    def forward(self, x):
+        return x * torch.sigmoid(x)
+
+def MLP(d_in, d_out=None, d_model=256, num_layers=6, actfn="swish"):
+    assert num_layers > 1, "No weak linear nets here"
+    d_out = d_in if d_out is None else d_out
+    actfn = Swish()
+    layers = [nn.Linear(d_in, d_model)]
+
+    for _ in range(num_layers - 2):
+        layers.append(actfn)
+        layers.append(nn.Linear(d_model, d_model))
+    layers.append(actfn)
+    layers.append(nn.Linear(d_model, d_out))
+    return nn.Sequential(*layers)
+
 
 def tMLP(d_in, d_out=None, d_model=256, num_layers=6, actfn="swish", fourier=None):
     assert num_layers > 1, "No weak linear nets here"
@@ -69,18 +86,16 @@ class LatentRectifiedFlow(nn.Module):
         manifold
     ):
         super().__init__()
-        self.encoder = tMLP(
+        self.encoder = MLP(
             d_in, d_latent, d_model,
-            num_ae_layers//2, actfn, fourier)
-        self.decoder = tMLP(
+            num_ae_layers//2, actfn)
+        self.decoder = MLP(
             d_latent, d_in, d_model,
-            num_ae_layers//2, actfn, fourier)
+            num_ae_layers//2, actfn)
         self.latent_vecfield = tMLP(
             d_latent, d_latent, d_model,
             num_fm_layers, actfn, fourier)
         self.manifold = manifold
-
-        self.register_buffer("decision_boundary", torch.randn(d_latent))
 
     def forward(self, t, x_or_l, projl=True, vecfield=True, recon=True):
         # Batchify
@@ -92,17 +107,16 @@ class LatentRectifiedFlow(nn.Module):
         if projl:
             x = x_or_l
             x = self._apply_manifold_constraint(x)
-            # l = self.encoder(t, x)
-            l = self.encoder(torch.zeros_like(t), x)
-            l_ = l.detach()
+            l = self.encoder(x)
+            # l_ = l.detach()
         else:
             l = x_or_l
-            l_ = l      # NOTE: Required for computation of divergence.
+            # l_ = l      # NOTE: Required for computation of divergence.
 
-        # x_hat = self.decoder(t, l) if recon else None
-        x_hat = self.decoder(torch.zeros_like(t), l) if recon else None
-        # NOTE: detach latent in flow matching loss.
-        v = self.latent_vecfield(t, l_) if vecfield else None
+        # # NOTE: detach latent in flow matching loss.
+        # v = self.latent_vecfield(t, l_) if vecfield else None
+        v = self.latent_vecfield(t, l) if vecfield else None
+        x_hat = self.decoder(l) if recon else None
 
         # Unbatchify
         if not has_batch:
@@ -146,13 +160,13 @@ def latent_odeint(model, x, t):
     for i in range(num_steps):
         ti, dt = t[i], t[i+1] - t[i]
         # l = model.encoder(ti, x)
-        l = model.encoder(torch.zeros_like(ti), x)
+        l = model.encoder(x)
         v = model.latent_vecfield(ti, l)
 
         # Extrapolate latent.
         l = l + v * dt
         # x = model.decoder(ti, l)
-        x = model.decoder(torch.zeros_like(ti), l)
+        x = model.decoder(l)
         xs.append(x)
 
     xs = torch.stack(xs, dim=0)
@@ -166,14 +180,12 @@ def projx_latent_odeint(manifold, model, x, t, projx=True, local_coords=False):
     xs = [x]
     for i in range(num_steps):
         ti, dt = t[i], t[i+1] - t[i]
-        # l = model.encoder(ti, x)
-        l = model.encoder(torch.zeros_like(ti), x)
+        l = model.encoder(x)
         v = model.latent_vecfield(ti, l)
 
         # Extrapolate latent.
         l = l + v * dt
-        # x = model.decoder(ti, l)
-        x = model.decoder(torch.zeros_like(ti), l)
+        x = model.decoder(l)
         if projx:
             x = manifold.projx(x)
         xs.append(x)

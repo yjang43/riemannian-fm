@@ -67,7 +67,6 @@ def main(cfg: DictConfig):
     train_loader, val_loader, test_loader = get_loaders(cfg)
 
     # Construct model
-    assert "autoencoder_ckpt" not in cfg, "autoencoder_ckpt is deprecated!"
     if cfg.get("ckpt", None) is None:
         # First stage: traing autoencoder.
         model = ManifoldAELitModule(cfg)

@@ -1,3 +1,6 @@
 [submodule "external/diffusion_policy"]
 	path = external/diffusion_policy
 	url = https://github.com/real-stanford/diffusion_policy.git
+[submodule "external/robomimic"]
+	path = external/robomimic
+	url = https://github.com/ARISE-Initiative/robomimic.git

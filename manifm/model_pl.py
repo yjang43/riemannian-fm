@@ -826,7 +826,7 @@ class LatentFMLitModule(pl.LightningModule):
             l_t, _, _ = self.model(t, x_t, vecfield=False, recon=False)
         # v_t = l1 - l0
         # NOTE: This correct the error cascaded from the autoencoder.
-        v_t = (l1 - l_t) / (1 - t)
+        v_t = (l1 - l_t) / torch.clamp((1 - t), min=1e-8)
 
 
         # NOTE: Check error cascaded from the autoencoder.

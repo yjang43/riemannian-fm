@@ -296,6 +296,7 @@ class LatentFMLitModule(pl.LightningModule):
         model.load_state_dict({
             k.replace("model.", ""): v
             for k, v in ckpt["state_dict"].items()
+            if "shadow_params" not in k and "num_updates" not in k
         }, strict=cfg.get("reflow", False))
 
         # Freeze encoder.

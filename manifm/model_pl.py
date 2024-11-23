@@ -61,8 +61,7 @@ class ManifoldFMLitModule(pl.LightningModule):
         self.manifold, self.dim = get_manifold(cfg)
 
         # Model of the vector field.
-        self.model = EMA(
-            Unbatch(  # Ensures vmap works.
+        model=Unbatch(  # Ensures vmap works.
                 ProjectToTangent(  # Ensures we can just use Euclidean divergence.
                     tMLP(  # Vector field in the ambient space.
                         self.dim,
@@ -74,7 +73,20 @@ class ManifoldFMLitModule(pl.LightningModule):
                     manifold=self.manifold,
                     metric_normalize=self.cfg.model.get("metric_normalize", False),
                 )
-            ),
+            )
+        
+        ckpt_path = cfg.get("ckpt", None)
+        if not ckpt_path:
+            raise ValueError("checkpoint must be provided to train second stage.")
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        model.load_state_dict({
+            k.replace("model.", ""): v
+            for k, v in ckpt["state_dict"].items()
+            if "shadow_params" not in k and "num_updates" not in k
+        }, strict=cfg.get("reflow", False))
+        
+        self.model = EMA(
+            model,
             cfg.optim.ema_decay,
         )
 

@@ -1,4 +1,4 @@
-"""Copyright (c) Meta Platforms, Inc. and affiliates."""
+t """Copyright (c) Meta Platforms, Inc. and affiliates."""
 
 import os
 
@@ -96,7 +96,7 @@ def main(cfg: DictConfig):
             pl.loggers.WandbLogger(
                 save_dir=".",
                 name=f"{cfg.data}_{now}",
-                project="ManiFM",
+                project="ManiFM_baseline_reflow",
                 log_model=False,
                 config=cfg_dict,
                 resume=True,
@@ -122,6 +122,7 @@ def main(cfg: DictConfig):
     # Check if a checkpoint exists in this working directory.  If so, then we are resuming from a pre-emption
     # This takes precedence over a command line specified checkpoint
     checkpoints = glob("checkpoints/**/*.ckpt", recursive=True)
+    #checkpoints = glob(checkpoint, recursive=True)
     if len(checkpoints) > 0:
         # Use the checkpoint with the latest modification time
         checkpoint = sorted(checkpoints, key=os.path.getmtime)[-1]

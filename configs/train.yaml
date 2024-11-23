@@ -1,7 +1,8 @@
 defaults:
   - _self_
   - experiment: null
-  - override hydra/launcher: submitit_slurm
+  # - override hydra/launcher: submitit_slurm
+  - override hydra/launcher: joblib
   - override hydra/job_logging: colorlog
   - override hydra/hydra_logging: colorlog
 
@@ -77,10 +78,11 @@ hydra:
     dir: ./outputs/multiruns/${data}/fm/${now:%Y.%m.%d}/${now:%H%M%S}
     subdir: ${hydra.job.num}
   launcher:
-    max_num_timeout: 100000
-    timeout_min: 4319
-    cpus_per_task: 10
-    gpus_per_node: 1
-    nodes: 1
-    partition: learnlab
-    constraint: volta32gb
+    n_jobs: 5
+  #   max_num_timeout: 100000
+  #   timeout_min: 4319
+  #   cpus_per_task: 10
+  #   gpus_per_node: 1
+  #   nodes: 1
+  #   partition: learnlab
+  #   constraint: volta32gb

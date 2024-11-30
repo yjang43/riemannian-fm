@@ -61,8 +61,7 @@ class ManifoldFMLitModule(pl.LightningModule):
         self.manifold, self.dim = get_manifold(cfg)
 
         # Model of the vector field.
-        self.model = EMA(
-            Unbatch(  # Ensures vmap works.
+        model=Unbatch(  # Ensures vmap works.
                 ProjectToTangent(  # Ensures we can just use Euclidean divergence.
                     tMLP(  # Vector field in the ambient space.
                         self.dim,
@@ -74,7 +73,21 @@ class ManifoldFMLitModule(pl.LightningModule):
                     manifold=self.manifold,
                     metric_normalize=self.cfg.model.get("metric_normalize", False),
                 )
-            ),
+            )
+        
+        # TODO: This is to temporarily make inference. Need to uncomment to properly train reflow.
+        # ckpt_path = cfg.get("ckpt", None)
+        # if not ckpt_path:
+        #     raise ValueError("checkpoint must be provided to train second stage.")
+        # ckpt = torch.load(ckpt_path, map_location="cpu")
+        # model.load_state_dict({
+        #     k.replace("model.", ""): v
+        #     for k, v in ckpt["state_dict"].items()
+        #     if "shadow_params" not in k and "num_updates" not in k
+        # }, strict=cfg.get("reflow", False))
+        
+        self.model = EMA(
+            model,
             cfg.optim.ema_decay,
         )
 
@@ -424,7 +437,7 @@ class ManifoldFMLitModule(pl.LightningModule):
         return x1
 
     @torch.no_grad()
-    def sample_all(self, n_samples, device, x0=None):
+    def sample_all(self, n_samples, device, x0=None, num_steps=1000):
         if x0 is None:
             # Sample from base distribution.
             x0 = (
@@ -438,7 +451,7 @@ class ManifoldFMLitModule(pl.LightningModule):
             self.manifold,
             self.vecfield,
             x0,
-            t=torch.linspace(0, 1, 1001).to(device),
+            t=torch.linspace(0, 1, num_steps+1).to(device),
             method="euler",
             projx=True,
             pbar=True,

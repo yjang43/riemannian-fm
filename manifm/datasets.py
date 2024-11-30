@@ -20,6 +20,23 @@ def load_csv(filename):
     dataset = np.array(list(lines)[1:]).astype(np.float64)
     return dataset
 
+class ReflowEarthData(Dataset):
+    manifold = Sphere()
+    dim = 3
+
+    def __init__(self, dirname, filename):
+        # .npz file.
+        filename = os.path.join(dirname, filename)
+        data = np.load(filename)
+        self.x0 = torch.tensor(data["x0"])
+        self.x1 = torch.tensor(data["x1"])
+        assert self.x0.shape == self.x1.shape
+
+    def __len__(self):
+        return self.x0.shape[0]
+
+    def __getitem__(self, idx):
+        return {"x0": self.x0[idx], "x1": self.x1[idx]}
 
 class EarthData(Dataset):
     manifold = Sphere()
@@ -342,7 +359,13 @@ class ExpandDataset(Dataset):
 
 def _get_dataset(cfg):
     expand_factor = 1
-    if cfg.data == "volcano":
+    if cfg.data == "reflow_fire":
+        dataset = ReflowEarthData(cfg.get("datadir", None), "reflow_fire.npz")
+        expand_factor = 100
+    elif cfg.data == "reflow_earthquake":
+        dataset = ReflowEarthData(cfg.get("datadir", None), "reflow_fire.npz")
+        expand_factor = 210
+    elif cfg.data == "volcano":
         dataset = Volcano(cfg.get("earth_datadir", cfg.get("datadir", None)))
         expand_factor = 1550
     elif cfg.data == "earthquake":

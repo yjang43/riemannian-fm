@@ -1,0 +1,8 @@
+ckpt: /home/each/workspace/riemannian-fm/outputs/multiruns/earthquake/fm/2024.11.21/005802/2/checkpoints/last.ckpt
+#ckpt: /home/each/workspace/riemannian-fm/outputs/multiruns/fire/fm/2024.11.21/002033/1/checkpoints/last.ckpt
+device: cuda
+data_size: 10000
+batch_size: 8192
+num_steps: 1000
+datadir: /home/each/workspace/riemannian-fm/data/reflow
+data: earthquake

@@ -49,6 +49,10 @@ def load_model(checkpoint: str, eval_projx=None, atol=None, rtol=None):
     if rtol is not None:
         cfg.model.rtol = rtol
 
+    # TODO: Include robotics tasks in general.
+    if cfg.data == "robomimic":
+        from manifm.model_pl_v2 import ManifoldAELitModule, LatentFMLitModule
+
     if "ckpt" in cfg:
         model = LatentFMLitModule(cfg)
     else:

@@ -9,9 +9,11 @@ import igl
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from manifm.manifolds import Sphere, FlatTorus, Mesh, SPD, PoincareBall
+from manifm.manifolds import Sphere, FlatTorus, Mesh, SPD, PoincareBall, Robotics
 from manifm.manifolds.mesh import Metric
 from manifm.utils import cartesian_from_latlon
+
+from robomimic import RoboMimicDataset, robomimic_transform
 
 
 def load_csv(filename):
@@ -361,9 +363,38 @@ class ExpandDataset(Dataset):
 
 def _get_dataset(cfg):
     expand_factor = 1
-    if cfg.data == "reflow_fire":
-        dataset = ReflowEarthData(cfg.get("datadir", None), "reflow_fire.npz")
+    if cfg.data == "robomimic":
+        datadir = cfg.get("robomimic_datadir", cfg.get("datadir", None))
+        dataset = RoboMimicDataset(
+            os.path.join(datadir, "image_abs_v141.hdf5"),
+            train=True,
+            transform=robomimic_transform
+        )
         expand_factor = 100
+    elif cfg.data == "reflow_earthquake":
+        dataset = ReflowEarthData(
+            cfg.get("earth_datadir", cfg.get("datadir", None)),
+            "reflow_earthquake.npz"
+        )
+        expand_factor = 1
+    elif cfg.data == "reflow_fire":
+        dataset = ReflowEarthData(
+            cfg.get("earth_datadir", cfg.get("datadir", None)),
+            "reflow_fire.npz"
+        )
+        expand_factor = 1
+    elif cfg.data == "reflow_flood":
+        dataset = ReflowEarthData(
+            cfg.get("earth_datadir", cfg.get("datadir", None)),
+            "reflow_flood.npz"
+        )
+        expand_factor = 1
+    elif cfg.data == "reflow_volcano":
+        dataset = ReflowEarthData(
+            cfg.get("earth_datadir", cfg.get("datadir", None)),
+            "reflow_volcano.npz"
+        )
+        expand_factor = 1
     elif cfg.data == "volcano":
         dataset = Volcano(cfg.get("earth_datadir", cfg.get("datadir", None)))
         expand_factor = 1550
@@ -449,30 +480,43 @@ def _get_dataset(cfg):
 def get_loaders(cfg):
     dataset, expand_factor = _get_dataset(cfg)
 
-    N = len(dataset)
-    N_val = N_test = N // 10
-    N_train = N - N_val - N_test
+    if isinstance(dataset.manifold, Robotics):
+        datadir = cfg.get("robomimic_datadir", cfg.get("datadir", None))
+        train_set = dataset
+        val_set = RoboMimicDataset(
+            os.path.join(datadir, "image_abs_v141.hdf5"),
+            train=False,
+            transform=robomimic_transform
+        )
+        test_set = val_set
+        num_workers = cfg.optim.num_workers
 
-    data_seed = cfg.seed if cfg.data_seed is None else cfg.data_seed
-    if data_seed is None:
-        raise ValueError("seed for data generation must be provided")
-    train_set, val_set, test_set = torch.utils.data.random_split(
-        dataset,
-        [N_train, N_val, N_test],
-        generator=torch.Generator().manual_seed(data_seed),
-    )
+    else:
+        N = len(dataset)
+        N_val = N_test = N // 10
+        N_train = N - N_val - N_test
+
+        data_seed = cfg.seed if cfg.data_seed is None else cfg.data_seed
+        if data_seed is None:
+            raise ValueError("seed for data generation must be provided")
+        train_set, val_set, test_set = torch.utils.data.random_split(
+            dataset,
+            [N_train, N_val, N_test],
+            generator=torch.Generator().manual_seed(data_seed),
+        )
+        num_workers = 0
 
     # Expand the training set (we optimize based on number of iterations anyway).
     train_set = ExpandDataset(train_set, expand_factor=expand_factor)
 
     train_loader = DataLoader(
-        train_set, cfg.optim.batch_size, shuffle=True, pin_memory=True, drop_last=True
+        train_set, cfg.optim.batch_size, shuffle=True, pin_memory=True, drop_last=True, num_workers=num_workers
     )
     val_loader = DataLoader(
-        val_set, cfg.optim.val_batch_size, shuffle=False, pin_memory=True
+        val_set, cfg.optim.val_batch_size, shuffle=False, pin_memory=True, num_workers=num_workers
     )
     test_loader = DataLoader(
-        test_set, cfg.optim.val_batch_size, shuffle=False, pin_memory=True
+        test_set, cfg.optim.val_batch_size, shuffle=False, pin_memory=True, num_workers=num_workers
     )
 
     return train_loader, val_loader, test_loader

@@ -8,4 +8,5 @@ from .spd import SPD
 from .sphere import Sphere
 from .hyperbolic import PoincareBall
 from .mesh import Mesh
+from .robotics import Robotics
 from .utils import geodesic

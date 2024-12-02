@@ -33,6 +33,18 @@ def MLP(d_in, d_out=None, d_model=256, num_layers=6, actfn="swish"):
     layers.append(nn.Linear(d_model, d_out))
     return nn.Sequential(*layers)
 
+def cond_MLP(d_in, d_out=None, d_model=256, d_cond=512, num_layers=6, actfn="swish"):
+    assert num_layers > 1, "No weak linear nets here"
+    d_out = d_in if d_out is None else d_out
+    actfn = Swish()
+    layers = [nn.Linear(d_in+d_cond, d_model)]
+
+    for _ in range(num_layers - 2):
+        layers.append(actfn)
+        layers.append(nn.Linear(d_model, d_model))
+    layers.append(actfn)
+    layers.append(nn.Linear(d_model, d_out))
+    return nn.Sequential(*layers)
 
 def tMLP(d_in, d_out=None, d_model=256, num_layers=6, actfn="swish", fourier=None):
     assert num_layers > 1, "No weak linear nets here"
@@ -83,21 +95,37 @@ class LatentRectifiedFlow(nn.Module):
         num_fm_layers,
         actfn,
         fourier,
-        manifold
+        manifold,
+        has_cond=False,
     ):
         super().__init__()
-        self.encoder = MLP(
-            d_in, d_latent, d_model,
-            num_ae_layers//2, actfn)
-        self.decoder = MLP(
-            d_latent, d_in, d_model,
-            num_ae_layers//2, actfn)
-        self.latent_vecfield = tMLP(
-            d_latent, d_latent, d_model,
-            num_fm_layers, actfn, fourier)
-        self.manifold = manifold
+        if has_cond:
+            self.encoder = cond_MLP(
+                d_in, d_latent, d_model, 512,
+                num_ae_layers//2, actfn)
+            self.decoder = MLP(
+                d_latent, d_in, d_model,
+                num_ae_layers//2, actfn)
+            self.latent_vecfield = tMLP(
+                d_latent, d_latent, d_model,
+                num_fm_layers, actfn, fourier)
+            self.manifold = manifold
+        else:
+            self.encoder = MLP(
+                d_in, d_latent, d_model,
+                num_ae_layers//2, actfn)
+            self.decoder = MLP(
+                d_latent, d_in, d_model,
+                num_ae_layers//2, actfn)
+            self.latent_vecfield = tMLP(
+                d_latent, d_latent, d_model,
+                num_fm_layers, actfn, fourier)
+            self.manifold = manifold
 
-    def forward(self, t, x_or_l, projl=True, vecfield=True, recon=True):
+    def forward(self, t, x_or_l, cond=None, projl=True, vecfield=True, recon=True):
+        if cond is not None:
+            x_or_l = torch.cat([x_or_l, cond], dim=-1)
+
         # Batchify
         has_batch = x_or_l.ndim > 1
         if not has_batch:

@@ -22,6 +22,7 @@ from pytorch_lightning.callbacks import LearningRateMonitor
 
 from manifm.datasets import get_loaders
 from manifm.model_pl import ManifoldAELitModule, LatentFMLitModule
+from manifm.manifolds import Robotics
 
 torch.backends.cudnn.benchmark = True
 log = logging.getLogger(__name__)
@@ -69,7 +70,11 @@ def main(cfg: DictConfig):
     # Construct model
     if cfg.get("ckpt", None) is None:
         # First stage: traing autoencoder.
-        model = ManifoldAELitModule(cfg)
+        if isinstance(train_loader.dataset.dset.manifold, Robotics):
+            from manifm.model_pl_v2 import ManifoldAELitModule
+            model = ManifoldAELitModule(cfg)
+        else:
+            model = ManifoldAELitModule(cfg)
     else:
         # Second stage: train flow matching.
         model = LatentFMLitModule(cfg)
